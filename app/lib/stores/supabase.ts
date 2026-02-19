@@ -61,16 +61,24 @@ const storage =
 const savedConnection = storage ? storage.getItem('supabase_connection') : null;
 const savedCredentials = storage ? storage.getItem('supabaseCredentials') : null;
 
-const initialState: SupabaseConnectionState = savedConnection
-  ? JSON.parse(savedConnection)
-  : {
-      user: null,
-      token: '',
-      stats: undefined,
-      selectedProjectId: undefined,
-      isConnected: false,
-      project: undefined,
-    };
+const initialState: SupabaseConnectionState = (() => {
+  if (savedConnection) {
+    try {
+      return JSON.parse(savedConnection);
+    } catch (error) {
+      console.error('Error parsing stored Supabase connection:', error);
+      storage?.removeItem('supabase_connection');
+    }
+  }
+  return {
+    user: null,
+    token: '',
+    stats: undefined,
+    selectedProjectId: undefined,
+    isConnected: false,
+    project: undefined,
+  };
+})();
 
 if (savedCredentials && !initialState.credentials) {
   try {

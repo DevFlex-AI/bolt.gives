@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for the Tauri application",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "store:default",
+    "store:allow-get",
+    "store:allow-set",
+    "store:allow-save",
+    "store:allow-load",
+    "store:allow-keys",
+    "store:allow-has",
+    "store:allow-delete",
+    "store:allow-clear",
+    "http:default",
+    "http:allow-fetch",
+    "dialog:default",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "dialog:allow-confirm",
+    "shell:default",
+    "process:default",
+    "process:allow-restart",
+    "log:default",
+    "updater:default"
+  ]
+}
