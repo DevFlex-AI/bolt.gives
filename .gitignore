@@ -36,6 +36,11 @@ functions/build/
 _worker.bundle
 vite.config.ts.timestamp-*.mjs
 
+# Tauri
+/src-tauri/target
+/src-tauri/gen
+/src-tauri/Cargo.lock
+
 Modelfile
 modelfiles
 

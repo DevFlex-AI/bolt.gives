@@ -29,9 +29,18 @@ export default defineConfig((config) => {
       __APP_VERSION: JSON.stringify(process.env.npm_package_version || '1.0.1'),
     },
     build: {
-      target: 'esnext',
+      target: process.env.TAURI_PLATFORM ? 'chrome105' : 'esnext',
       // Lowers peak memory usage during production builds by skipping gzip/brotli size estimates.
       reportCompressedSize: false,
+    },
+    // prevent vite from obscuring rust errors
+    clearScreen: false,
+    server: {
+      // Tauri expects a fixed port, fail if that port is not available
+      strictPort: true,
+      // if the host Tauri is expecting is set, use it
+      host: process.env.TAURI_DEV_HOST ? true : undefined,
+      port: 5173,
     },
     plugins: [
       nodePolyfills({

@@ -9,13 +9,21 @@ const envToken = import.meta.env.VITE_NETLIFY_ACCESS_TOKEN;
 console.log('Netlify store: envToken loaded:', envToken ? '[TOKEN_EXISTS]' : '[NO_TOKEN]');
 
 // If we have an environment token but no stored connection, initialize with the env token
-const initialConnection: NetlifyConnection = storedConnection
-  ? JSON.parse(storedConnection)
-  : {
-      user: null,
-      token: envToken || '',
-      stats: undefined,
-    };
+const initialConnection: NetlifyConnection = (() => {
+  if (storedConnection) {
+    try {
+      return JSON.parse(storedConnection);
+    } catch (error) {
+      console.error('Error parsing stored Netlify connection:', error);
+      localStorage.removeItem('netlify_connection');
+    }
+  }
+  return {
+    user: null,
+    token: envToken || '',
+    stats: undefined,
+  };
+})();
 
 export const netlifyConnection = atom<NetlifyConnection>(initialConnection);
 export const isConnecting = atom<boolean>(false);
