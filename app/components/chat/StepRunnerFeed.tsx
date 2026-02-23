@@ -1,5 +1,4 @@
 import { useStore } from '@nanostores/react';
-import { FixedSizeList, type ListChildComponentProps } from 'react-window';
 import { workbenchStore } from '~/lib/stores/workbench';
 import type { InteractiveStepRunnerEvent } from '~/lib/runtime/interactive-step-runner';
 import type { JSONValue } from 'ai';
@@ -94,36 +93,6 @@ function isArchitectTimelineEvent(event: InteractiveStepRunnerEvent): boolean {
   return /architect/i.test(event.description || '');
 }
 
-type EventRowData = {
-  events: InteractiveStepRunnerEvent[];
-  getPrimaryText: (event: InteractiveStepRunnerEvent) => string;
-};
-
-function EventRow({ index, style, data }: ListChildComponentProps<EventRowData>) {
-  const event = data.events[index];
-
-  if (!event) {
-    return null;
-  }
-
-  const primaryText = data.getPrimaryText(event);
-
-  return (
-    <div style={style} className="font-mono px-1">
-      <div className="truncate">
-        <span className="mr-2 text-bolt-elements-textTertiary">[{event.type}]</span>
-        <span className="text-bolt-elements-textPrimary">{primaryText}</span>
-      </div>
-      {event.type === 'step-start' && event.command && event.command.length > 0 ? (
-        <div className="ml-10 truncate text-bolt-elements-textTertiary">{event.command.join(' ')}</div>
-      ) : null}
-      {event.type === 'error' ? (
-        <div className="ml-10 truncate text-bolt-elements-textTertiary">hint: {getSuggestedFix(event)}</div>
-      ) : null}
-    </div>
-  );
-}
-
 function renderArchitectCard(event: InteractiveStepRunnerEvent, index: number) {
   const status = event.type === 'error' ? 'warning' : event.type === 'step-end' ? 'complete' : 'in-progress';
   const eventLabel =
@@ -146,12 +115,18 @@ function renderArchitectCard(event: InteractiveStepRunnerEvent, index: number) {
         </span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${getStatusClasses(status)}`}>{status}</span>
       </div>
-      <div className="text-bolt-elements-textPrimary">{event.description || 'Architect update'}</div>
+      <div className="whitespace-pre-wrap break-words text-bolt-elements-textPrimary">
+        {event.description || 'Architect update'}
+      </div>
       {event.output || event.error ? (
-        <div className="mt-1 text-xs text-bolt-elements-textSecondary">{event.error || event.output}</div>
+        <div className="mt-1 whitespace-pre-wrap break-words text-xs text-bolt-elements-textSecondary">
+          {event.error || event.output}
+        </div>
       ) : null}
       {event.command && event.command.length > 0 ? (
-        <div className="mt-1 font-mono text-[11px] text-bolt-elements-textTertiary">{event.command.join(' ')}</div>
+        <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-bolt-elements-textTertiary">
+          {event.command.join(' ')}
+        </div>
       ) : null}
     </div>
   );
@@ -173,16 +148,16 @@ function renderCommentaryCard(event: AgentCommentaryAnnotation, index: number) {
           {event.status}
         </span>
       </div>
-      <div className="text-sm text-bolt-elements-textPrimary">{event.message}</div>
+      <div className="whitespace-pre-wrap break-words text-sm text-bolt-elements-textPrimary">{event.message}</div>
       {event.detail ? (
         <div className="mt-1 space-y-1 text-xs text-bolt-elements-textSecondary">
           {details.keyChanges ? (
-            <div>
+            <div className="whitespace-pre-wrap break-words">
               <span className="text-bolt-elements-textPrimary">Key changes:</span> {details.keyChanges}
             </div>
           ) : null}
           {details.next ? (
-            <div>
+            <div className="whitespace-pre-wrap break-words">
               <span className="text-bolt-elements-textPrimary">Next:</span> {details.next}
             </div>
           ) : null}
@@ -250,7 +225,7 @@ export function StepRunnerFeed(props: StepRunnerFeedProps) {
           Clear
         </button>
       </div>
-      <div className="max-h-52 space-y-2 overflow-y-auto">
+      <div className="max-h-[30rem] space-y-2 overflow-x-hidden overflow-y-auto pr-1">
         {commentaryEvents.map(renderCommentaryCard)}
         {architectEvents.map(renderArchitectCard)}
         {checkpointEvents.map((event, index) => (
@@ -266,13 +241,13 @@ export function StepRunnerFeed(props: StepRunnerFeedProps) {
                 {event.status}
               </span>
             </div>
-            <div className="text-bolt-elements-textPrimary">{event.message}</div>
+            <div className="whitespace-pre-wrap break-words text-bolt-elements-textPrimary">{event.message}</div>
             {event.command || typeof event.exitCode === 'number' || event.stderr ? (
               <details className="mt-1">
                 <summary className="cursor-pointer text-[11px] text-bolt-elements-textTertiary">
                   Technical details
                 </summary>
-                <div className="mt-1 space-y-1 font-mono text-[11px] text-bolt-elements-textTertiary">
+                <div className="mt-1 max-h-40 space-y-1 overflow-y-auto font-mono text-[11px] text-bolt-elements-textTertiary">
                   {event.command ? <div>{event.command}</div> : null}
                   {typeof event.exitCode === 'number' ? <div>exit {event.exitCode}</div> : null}
                   {event.stderr ? <div>{event.stderr}</div> : null}
@@ -281,32 +256,39 @@ export function StepRunnerFeed(props: StepRunnerFeedProps) {
             ) : null}
           </div>
         ))}
-        {recent.length > 32 ? (
-          <div className="h-44 overflow-hidden rounded border border-bolt-elements-borderColor/70 bg-bolt-elements-background-depth-3/40 py-1">
-            <FixedSizeList
-              height={168}
-              width="100%"
-              itemCount={recent.length}
-              itemSize={44}
-              itemData={{ events: recent, getPrimaryText }}
+        {recent.map((event, index) => {
+          const primaryText = getPrimaryText(event);
+
+          return (
+            <div
+              key={`${event.timestamp}-${event.type}-${index}`}
+              className="rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-3 px-2 py-2"
             >
-              {EventRow}
-            </FixedSizeList>
-          </div>
-        ) : (
-          recent.map((event, index) => (
-            <div key={`${event.timestamp}-${event.type}-${index}`} className="font-mono">
-              <span className="mr-2 text-bolt-elements-textTertiary">[{event.type}]</span>
-              <span className="text-bolt-elements-textPrimary">{getPrimaryText(event)}</span>
+              <div className="mb-1 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-wide text-bolt-elements-textSecondary">
+                <span>[{event.type}]</span>
+                {typeof event.stepIndex === 'number' ? <span>step {event.stepIndex + 1}</span> : null}
+                {typeof event.exitCode === 'number' ? (
+                  <span className="rounded border border-bolt-elements-borderColor px-1 py-0">
+                    exit {event.exitCode}
+                  </span>
+                ) : null}
+              </div>
+              <div className="whitespace-pre-wrap break-words font-mono text-[12px] text-bolt-elements-textPrimary">
+                {primaryText}
+              </div>
               {event.type === 'step-start' && event.command && event.command.length > 0 ? (
-                <div className="ml-10 text-bolt-elements-textTertiary">{event.command.join(' ')}</div>
+                <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-bolt-elements-textTertiary">
+                  {event.command.join(' ')}
+                </div>
               ) : null}
-              {event.type === 'error' && (
-                <div className="ml-10 text-bolt-elements-textTertiary">hint: {getSuggestedFix(event)}</div>
-              )}
+              {event.type === 'error' ? (
+                <div className="mt-1 whitespace-pre-wrap break-words text-xs text-bolt-elements-textTertiary">
+                  hint: {getSuggestedFix(event)}
+                </div>
+              ) : null}
             </div>
-          ))
-        )}
+          );
+        })}
       </div>
     </div>
   );

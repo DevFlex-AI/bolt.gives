@@ -163,10 +163,12 @@ export function ExecutionTransparencyPanel(props: ExecutionTransparencyPanelProp
           Elapsed: <span className="text-bolt-elements-textPrimary">{formatDuration(elapsedMs)}</span>
         </div>
         <div className="sm:col-span-2">
-          Current step: <span className="text-bolt-elements-textPrimary">{currentStep}</span>
+          Current step:{' '}
+          <span className="whitespace-pre-wrap break-words text-bolt-elements-textPrimary">{currentStep}</span>
         </div>
         <div className="sm:col-span-2">
-          Why this action: <span className="text-bolt-elements-textPrimary">{whyThisAction}</span>
+          Why this action:{' '}
+          <span className="whitespace-pre-wrap break-words text-bolt-elements-textPrimary">{whyThisAction}</span>
         </div>
         <div>
           Tokens: <span className="text-bolt-elements-textPrimary">{usageEvent?.totalTokens ?? 0}</span>
@@ -213,7 +215,7 @@ export function ExecutionTransparencyPanel(props: ExecutionTransparencyPanelProp
           <div className="space-y-1">
             {subAgentEvents.map((event) => (
               <div
-                key={event.agentId}
+                key={`${event.agentId}-${event.state}-${event.createdAt}`}
                 className="rounded border border-bolt-elements-borderColor bg-bolt-elements-background-depth-3 p-2"
               >
                 <div className="flex items-center justify-between">
@@ -233,10 +235,12 @@ export function ExecutionTransparencyPanel(props: ExecutionTransparencyPanelProp
                   </span>
                 </div>
                 {event.model && (
-                  <div className="mt-1 text-xs text-bolt-elements-textSecondary">Model: {event.model}</div>
+                  <div className="mt-1 break-words text-xs text-bolt-elements-textSecondary">Model: {event.model}</div>
                 )}
                 {event.provider && (
-                  <div className="mt-1 text-xs text-bolt-elements-textSecondary">Provider: {event.provider}</div>
+                  <div className="mt-1 break-words text-xs text-bolt-elements-textSecondary">
+                    Provider: {event.provider}
+                  </div>
                 )}
                 {event.tokenUsage && (
                   <div className="mt-1 text-xs text-bolt-elements-textSecondary">
@@ -247,9 +251,8 @@ export function ExecutionTransparencyPanel(props: ExecutionTransparencyPanelProp
                 {event.plan && (
                   <div className="mt-2 text-xs text-bolt-elements-textPrimary">
                     <div className="mb-1 font-medium">Plan:</div>
-                    <div className="whitespace-pre-wrap opacity-90">
-                      {event.plan.slice(0, 200)}
-                      {event.plan.length > 200 ? '...' : ''}
+                    <div className="max-h-40 overflow-y-auto rounded border border-bolt-elements-borderColor/70 bg-bolt-elements-background-depth-2 p-2">
+                      <div className="whitespace-pre-wrap break-words opacity-90">{event.plan}</div>
                     </div>
                   </div>
                 )}
