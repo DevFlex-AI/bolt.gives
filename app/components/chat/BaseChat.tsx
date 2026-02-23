@@ -35,6 +35,7 @@ import type { AutonomyMode } from '~/lib/runtime/autonomy';
 import { ExecutionTransparencyPanel } from './ExecutionTransparencyPanel';
 import { ExecutionStickyFooter } from './ExecutionStickyFooter';
 import { UpdateBanner } from './UpdateBanner';
+import { workbenchStore } from '~/lib/stores/workbench';
 
 const TEXTAREA_MIN_HEIGHT = 140;
 
@@ -198,6 +199,17 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     useEffect(() => {
       onStreamingChange?.(isStreaming);
     }, [isStreaming, onStreamingChange]);
+
+    useEffect(() => {
+      if (!chatStarted) {
+        return;
+      }
+
+      // Keep a Replit-style split workspace visible on desktop sessions.
+      if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
+        workbenchStore.showWorkbench.set(true);
+      }
+    }, [chatStarted]);
 
     useEffect(() => {
       if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
@@ -386,8 +398,13 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         data-chat-visible={showChat}
       >
         <ClientOnly>{() => <Menu />}</ClientOnly>
-        <div className="flex flex-col lg:flex-row overflow-y-auto w-full h-full">
-          <div className={classNames(styles.Chat, 'flex flex-col flex-grow lg:min-w-[var(--chat-min-width)] h-full')}>
+        <div className="flex h-full w-full flex-col overflow-hidden lg:flex-row">
+          <div
+            className={classNames(
+              styles.Chat,
+              'relative flex h-full min-w-0 flex-col overflow-hidden lg:min-w-[var(--chat-min-width)] lg:max-w-[560px] lg:border-r lg:border-bolt-elements-borderColor',
+            )}
+          >
             {!chatStarted && (
               <div id="intro" className="mt-[16vh] max-w-2xl mx-auto text-center px-4 lg:px-0">
                 <h1 className="text-3xl lg:text-6xl font-bold text-bolt-elements-textPrimary mb-4 animate-fade-in">
@@ -426,8 +443,9 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                 <ScrollToBottom />
               </StickToBottom.Content>
               <div
-                className={classNames('my-auto flex flex-col gap-2 w-full mx-auto z-prompt mb-6', {
-                  'sticky bottom-2': chatStarted,
+                className={classNames('z-prompt mx-auto flex w-full flex-col gap-3', {
+                  'my-auto mb-6': !chatStarted,
+                  'mt-2': chatStarted,
                 })}
               >
                 <div className="flex flex-col gap-2">
@@ -463,74 +481,85 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   )}
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
                 </div>
-                {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
-                <ExecutionTransparencyPanel
-                  data={data}
-                  model={model}
-                  provider={provider}
-                  isStreaming={isStreaming}
-                  autonomyMode={autonomyMode}
-                  latestRunMetrics={latestRunMetrics}
-                  latestUsage={latestUsage}
-                />
-                <StepRunnerFeed data={data} />
-                <ExecutionStickyFooter data={data} model={model} provider={provider} isStreaming={isStreaming} />
-                <UpdateBanner />
-                <ChatBox
-                  isModelSettingsCollapsed={isModelSettingsCollapsed}
-                  setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
-                  provider={provider}
-                  setProvider={setProvider}
-                  providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
-                  model={model}
-                  setModel={setModel}
-                  modelList={modelList}
-                  apiKeys={apiKeys}
-                  isModelLoading={isModelLoading}
-                  onApiKeysChange={onApiKeysChange}
-                  uploadedFiles={uploadedFiles}
-                  setUploadedFiles={setUploadedFiles}
-                  imageDataList={imageDataList}
-                  setImageDataList={setImageDataList}
-                  textareaRef={textareaRef}
-                  input={input}
-                  handleInputChange={handleInputChange}
-                  handlePaste={handlePaste}
-                  TEXTAREA_MIN_HEIGHT={TEXTAREA_MIN_HEIGHT}
-                  TEXTAREA_MAX_HEIGHT={TEXTAREA_MAX_HEIGHT}
-                  isStreaming={isStreaming}
-                  handleStop={handleStop}
-                  handleSendMessage={handleSendMessage}
-                  enhancingPrompt={enhancingPrompt}
-                  enhancePrompt={enhancePrompt}
-                  isListening={isListening}
-                  startListening={startListening}
-                  stopListening={stopListening}
-                  chatStarted={chatStarted}
-                  exportChat={exportChat}
-                  qrModalOpen={qrModalOpen}
-                  setQrModalOpen={setQrModalOpen}
-                  handleFileUpload={handleFileUpload}
-                  chatMode={chatMode}
-                  setChatMode={setChatMode}
-                  designScheme={designScheme}
-                  setDesignScheme={setDesignScheme}
-                  selectedElement={selectedElement}
-                  setSelectedElement={setSelectedElement}
-                  onWebSearchResult={onWebSearchResult}
-                  onSaveSession={onSaveSession}
-                  onResumeSession={onResumeSession}
-                  onShareSession={onShareSession}
-                  agentMode={agentMode}
-                  setAgentMode={setAgentMode}
-                  onSketchChange={onSketchChange}
-                  autonomyMode={autonomyMode}
-                  setAutonomyMode={setAutonomyMode}
-                />
-                <div className="rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 px-3 py-2 text-xs text-bolt-elements-textSecondary">
-                  <span className="font-medium text-bolt-elements-textPrimary">Built-in web research:</span> Bolt.gives
-                  can browse the web with Playwright, study API documentation from a URL, and generate a{' '}
-                  <code>.md</code> file with its understanding of the full API environment. No setup is required.
+                {chatStarted ? (
+                  <div className="max-h-[38vh] overflow-x-hidden overflow-y-auto rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 p-2">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-bolt-elements-textSecondary">
+                      Technical Feed
+                    </div>
+                    <div className="space-y-2">
+                      {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
+                      <ExecutionTransparencyPanel
+                        data={data}
+                        model={model}
+                        provider={provider}
+                        isStreaming={isStreaming}
+                        autonomyMode={autonomyMode}
+                        latestRunMetrics={latestRunMetrics}
+                        latestUsage={latestUsage}
+                      />
+                      <StepRunnerFeed data={data} />
+                      <ExecutionStickyFooter data={data} model={model} provider={provider} isStreaming={isStreaming} />
+                      <UpdateBanner />
+                    </div>
+                  </div>
+                ) : null}
+                <div className={classNames('flex flex-col gap-2', { 'sticky bottom-2 z-10': chatStarted })}>
+                  <ChatBox
+                    isModelSettingsCollapsed={isModelSettingsCollapsed}
+                    setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
+                    provider={provider}
+                    setProvider={setProvider}
+                    providerList={providerList || (PROVIDER_LIST as ProviderInfo[])}
+                    model={model}
+                    setModel={setModel}
+                    modelList={modelList}
+                    apiKeys={apiKeys}
+                    isModelLoading={isModelLoading}
+                    onApiKeysChange={onApiKeysChange}
+                    uploadedFiles={uploadedFiles}
+                    setUploadedFiles={setUploadedFiles}
+                    imageDataList={imageDataList}
+                    setImageDataList={setImageDataList}
+                    textareaRef={textareaRef}
+                    input={input}
+                    handleInputChange={handleInputChange}
+                    handlePaste={handlePaste}
+                    TEXTAREA_MIN_HEIGHT={TEXTAREA_MIN_HEIGHT}
+                    TEXTAREA_MAX_HEIGHT={TEXTAREA_MAX_HEIGHT}
+                    isStreaming={isStreaming}
+                    handleStop={handleStop}
+                    handleSendMessage={handleSendMessage}
+                    enhancingPrompt={enhancingPrompt}
+                    enhancePrompt={enhancePrompt}
+                    isListening={isListening}
+                    startListening={startListening}
+                    stopListening={stopListening}
+                    chatStarted={chatStarted}
+                    exportChat={exportChat}
+                    qrModalOpen={qrModalOpen}
+                    setQrModalOpen={setQrModalOpen}
+                    handleFileUpload={handleFileUpload}
+                    chatMode={chatMode}
+                    setChatMode={setChatMode}
+                    designScheme={designScheme}
+                    setDesignScheme={setDesignScheme}
+                    selectedElement={selectedElement}
+                    setSelectedElement={setSelectedElement}
+                    onWebSearchResult={onWebSearchResult}
+                    onSaveSession={onSaveSession}
+                    onResumeSession={onResumeSession}
+                    onShareSession={onShareSession}
+                    agentMode={agentMode}
+                    setAgentMode={setAgentMode}
+                    onSketchChange={onSketchChange}
+                    autonomyMode={autonomyMode}
+                    setAutonomyMode={setAutonomyMode}
+                  />
+                  <div className="rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 px-3 py-2 text-xs text-bolt-elements-textSecondary">
+                    <span className="font-medium text-bolt-elements-textPrimary">Built-in web research:</span>{' '}
+                    Bolt.gives can browse the web with Playwright, study API documentation from a URL, and generate a{' '}
+                    <code>.md</code> file with its understanding of the full API environment. No setup is required.
+                  </div>
                 </div>
               </div>
             </StickToBottom>

@@ -223,9 +223,9 @@
   /* Keep header compact so chat/workbench get the space. */
   --header-height: 80px;
 
-  /* Increase chat real estate (prompt + responses). */
+  /* Replit-style split: technical rail on the left, workbench on the right. */
   --chat-max-width: 72rem;
-  --chat-min-width: 533px;
+  --chat-min-width: clamp(420px, 34vw, 560px);
   --workbench-width: min(calc(100% - var(--chat-min-width)), 2536px);
   --workbench-inner-width: var(--workbench-width);
   --workbench-left: calc(100% - var(--workbench-width));
