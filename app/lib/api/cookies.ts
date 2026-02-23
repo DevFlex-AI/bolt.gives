@@ -1,3 +1,5 @@
+import { normalizeCredential } from '~/lib/runtime/credentials';
+
 export function parseCookies(cookieHeader: string | null) {
   const cookies: Record<string, string> = {};
 
@@ -24,7 +26,29 @@ export function parseCookies(cookieHeader: string | null) {
 
 export function getApiKeysFromCookie(cookieHeader: string | null): Record<string, string> {
   const cookies = parseCookies(cookieHeader);
-  return cookies.apiKeys ? JSON.parse(cookies.apiKeys) : {};
+
+  if (!cookies.apiKeys) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(cookies.apiKeys) as Record<string, unknown>;
+    const normalized: Record<string, string> = {};
+
+    for (const [providerName, value] of Object.entries(parsed)) {
+      const credential = normalizeCredential(value);
+
+      if (!credential) {
+        continue;
+      }
+
+      normalized[providerName] = credential;
+    }
+
+    return normalized;
+  } catch {
+    return {};
+  }
 }
 
 export function getProviderSettingsFromCookie(cookieHeader: string | null): Record<string, any> {

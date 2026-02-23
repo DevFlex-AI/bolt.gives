@@ -125,6 +125,11 @@ export default class AnthropicProvider extends BaseProvider {
       defaultBaseUrlKey: '',
       defaultApiTokenKey: 'ANTHROPIC_API_KEY',
     });
+
+    if (!apiKey) {
+      throw new Error(`Missing API key for ${this.name} provider`);
+    }
+
     const anthropic = createAnthropic({
       apiKey,
       headers: { 'anthropic-beta': 'output-128k-2025-02-19' },

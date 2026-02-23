@@ -1,6 +1,7 @@
 import type { LoaderFunction } from '@remix-run/cloudflare';
 import { LLMManager } from '~/lib/modules/llm/manager';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
+import { normalizeCredential } from '~/lib/runtime/credentials';
 
 export const loader: LoaderFunction = async ({ context, request }) => {
   const url = new URL(request.url);
@@ -30,11 +31,11 @@ export const loader: LoaderFunction = async ({ context, request }) => {
    * 3. Process environment variables (from .env.local)
    * 4. LLMManager environment variables
    */
-  const isSet = !!(
-    apiKeys?.[provider] ||
-    (context?.cloudflare?.env as Record<string, any>)?.[envVarName] ||
-    process.env[envVarName] ||
-    llmManager.env[envVarName]
+  const isSet = Boolean(
+    normalizeCredential(apiKeys?.[provider]) ||
+      normalizeCredential((context?.cloudflare?.env as Record<string, any>)?.[envVarName]) ||
+      normalizeCredential(process.env[envVarName]) ||
+      normalizeCredential(llmManager.env[envVarName]),
   );
 
   return Response.json({ isSet });

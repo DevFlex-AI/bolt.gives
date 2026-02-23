@@ -2,6 +2,7 @@ import type { LanguageModelV1 } from 'ai';
 import type { ProviderInfo, ProviderConfig, ModelInfo } from './types';
 import type { IProviderSetting } from '~/types/model';
 import { createOpenAI } from '@ai-sdk/openai';
+import { normalizeCredential, normalizeHttpUrl } from '~/lib/runtime/credentials';
 
 /** Default timeout for model listing API calls (5 seconds) */
 const MODEL_FETCH_TIMEOUT = 5_000;
@@ -69,21 +70,21 @@ export abstract class BaseProvider implements ProviderInfo {
     defaultApiTokenKey: string;
   }) {
     const { apiKeys, providerSettings, serverEnv, defaultBaseUrlKey, defaultApiTokenKey } = options;
-    let settingsBaseUrl = providerSettings?.baseUrl;
-
-    if (settingsBaseUrl && settingsBaseUrl.length == 0) {
-      settingsBaseUrl = undefined;
-    }
+    const normalizedSettingsBaseUrl = normalizeHttpUrl(providerSettings?.baseUrl);
 
     const baseUrlKey = this.config.baseUrlKey || defaultBaseUrlKey;
-    let baseUrl = settingsBaseUrl || serverEnv?.[baseUrlKey] || process?.env?.[baseUrlKey] || this.config.baseUrl;
+    const envBaseUrl = normalizeHttpUrl(serverEnv?.[baseUrlKey]) || normalizeHttpUrl(process?.env?.[baseUrlKey]);
+    let baseUrl = normalizedSettingsBaseUrl || envBaseUrl || this.config.baseUrl;
 
     if (baseUrl && baseUrl.endsWith('/')) {
       baseUrl = baseUrl.slice(0, -1);
     }
 
     const apiTokenKey = this.config.apiTokenKey || defaultApiTokenKey;
-    const apiKey = apiKeys?.[this.name] || serverEnv?.[apiTokenKey] || process?.env?.[apiTokenKey];
+    const apiKey =
+      normalizeCredential(apiKeys?.[this.name]) ||
+      normalizeCredential(serverEnv?.[apiTokenKey]) ||
+      normalizeCredential(process?.env?.[apiTokenKey]);
 
     return {
       baseUrl,

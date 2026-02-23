@@ -1,4 +1,5 @@
 import type { ModelInfo } from '~/lib/modules/llm/types';
+import { normalizeCredential } from '~/lib/runtime/credentials';
 
 export const PROVIDER_MODEL_SELECTION_STORAGE_KEY = 'bolt_provider_model_selection_v1';
 export const PROVIDER_HISTORY_STORAGE_KEY = 'bolt_provider_history_v1';
@@ -38,15 +39,11 @@ function isValidBedrockConfig(rawKey: string): boolean {
       accessKeyId?: unknown;
       secretAccessKey?: unknown;
     };
+    const region = normalizeCredential(parsed.region);
+    const accessKeyId = normalizeCredential(parsed.accessKeyId);
+    const secretAccessKey = normalizeCredential(parsed.secretAccessKey);
 
-    return (
-      typeof parsed.region === 'string' &&
-      parsed.region.trim().length > 0 &&
-      typeof parsed.accessKeyId === 'string' &&
-      parsed.accessKeyId.trim().length > 0 &&
-      typeof parsed.secretAccessKey === 'string' &&
-      parsed.secretAccessKey.trim().length > 0
-    );
+    return Boolean(region && accessKeyId && secretAccessKey);
   } catch {
     return false;
   }
@@ -92,17 +89,13 @@ export function parseApiKeysCookie(raw: string | undefined): Record<string, stri
   const normalized: Record<string, string> = {};
 
   for (const [providerName, value] of Object.entries(parsed)) {
-    if (typeof value !== 'string') {
+    const credential = normalizeCredential(value);
+
+    if (!credential) {
       continue;
     }
 
-    const trimmedValue = value.trim();
-
-    if (trimmedValue.length === 0) {
-      continue;
-    }
-
-    normalized[providerName] = trimmedValue;
+    normalized[providerName] = credential;
   }
 
   return normalized;
@@ -153,13 +146,9 @@ export function rememberInstanceSelection(
 }
 
 export function hasUsableApiKey(apiKeys: Record<string, string>, providerName: string): boolean {
-  if (typeof apiKeys[providerName] !== 'string') {
-    return false;
-  }
+  const normalizedKey = normalizeCredential(apiKeys[providerName]);
 
-  const trimmedKey = apiKeys[providerName].trim();
-
-  if (trimmedKey.length === 0) {
+  if (!normalizedKey) {
     return false;
   }
 
@@ -169,7 +158,7 @@ export function hasUsableApiKey(apiKeys: Record<string, string>, providerName: s
     return true;
   }
 
-  return validator(trimmedKey);
+  return validator(normalizedKey);
 }
 
 export function pickPreferredProviderName(options: PickPreferredProviderNameOptions): string | undefined {

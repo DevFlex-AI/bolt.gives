@@ -3,6 +3,7 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import {
   buildInstanceSelectionStorageKey,
   getRememberedProviderModel,
+  hasUsableApiKey,
   parseApiKeysCookie,
   pickPreferredProviderName,
   readProviderHistory,
@@ -29,6 +30,7 @@ describe('model-selection utilities', () => {
       JSON.stringify({
         OpenAI: ' sk-live ',
         Anthropic: '',
+        Together: ' ROTATE_REQUIRED ',
         invalid: 42,
       }),
     );
@@ -36,6 +38,22 @@ describe('model-selection utilities', () => {
     expect(parsed).toEqual({
       OpenAI: 'sk-live',
     });
+  });
+
+  it('treats placeholder api keys as unusable', () => {
+    expect(
+      hasUsableApiKey(
+        {
+          OpenAI: 'ROTATE_REQUIRED',
+          Anthropic: '  your_key_here  ',
+          Groq: 'gsk_realish_token',
+        },
+        'OpenAI',
+      ),
+    ).toBe(false);
+
+    expect(hasUsableApiKey({ Anthropic: 'your_key_here' }, 'Anthropic')).toBe(false);
+    expect(hasUsableApiKey({ Groq: 'gsk_realish_token' }, 'Groq')).toBe(true);
   });
 
   it('prefers the most recently configured provider when it is active and usable', () => {
