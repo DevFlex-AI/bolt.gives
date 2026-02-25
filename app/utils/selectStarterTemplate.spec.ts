@@ -25,7 +25,7 @@ describe('getTemplates', () => {
       ) as unknown as typeof fetch,
     );
 
-    const result = await getTemplates('Vite React', 'Fallback Test');
+    const result = await getTemplates('Vite React', 'Fallback Test', 'Build a todo app with Google Calendar sync');
 
     expect(result).not.toBeNull();
     expect(result?.assistantMessage).toContain('<boltAction type="shell">');
@@ -35,6 +35,7 @@ describe('getTemplates', () => {
     expect(result?.assistantMessage).toContain('pnpm run dev');
     expect(result?.assistantMessage).toContain('filePath="README.md"');
     expect(result?.assistantMessage).toContain('filePath="package.json"');
+    expect(result?.usingLocalFallback).toBe(true);
 
     const packageIndex = result?.assistantMessage.indexOf('filePath="package.json"') ?? -1;
     const installIndex = result?.assistantMessage.indexOf('pnpm install') ?? -1;
@@ -43,41 +44,39 @@ describe('getTemplates', () => {
     expect(packageIndex).toBeLessThan(installIndex);
     expect(result?.userMessage).toContain('Fallback starter note');
     expect(result?.userMessage).toContain('queued automatically');
+    expect(result?.userMessage).toContain('Do not stop after scaffold/install/start');
+    expect(result?.userMessage).toContain('continue feature implementation');
+    expect(result?.userMessage).toContain('Original request:');
+    expect(result?.userMessage).toContain('Build a todo app with Google Calendar sync');
   });
 
-  it('uses remote files when the template API succeeds', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify([
-            {
-              name: 'package.json',
-              path: 'package.json',
-              content: '{"name":"demo"}',
-            },
-            {
-              name: 'prompt',
-              path: '.bolt/prompt',
-              content: 'Use remote prompt',
-            },
-          ]),
+  it('prefers local starter files for templates that have a bundled fallback', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
           {
-            status: 200,
-            headers: {
-              'Content-Type': 'application/json',
-            },
+            name: 'package.json',
+            path: 'package.json',
+            content: '{"name":"remote-demo"}',
           },
-        ),
-      ) as unknown as typeof fetch,
+        ]),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        },
+      ),
     );
+    vi.stubGlobal('fetch', fetchSpy as unknown as typeof fetch);
 
     const result = await getTemplates('Vite React', 'Remote Test');
 
     expect(result).not.toBeNull();
     expect(result?.assistantMessage).toContain('filePath="package.json"');
-    expect(result?.userMessage).toContain('Use remote prompt');
-    expect(result?.userMessage).not.toContain('Fallback starter note');
+    expect(result?.userMessage).toContain('Fallback starter note');
+    expect(result?.usingLocalFallback).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

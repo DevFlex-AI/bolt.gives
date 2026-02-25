@@ -51,6 +51,20 @@ class LogStore {
   showLogs = atom(true);
   private _readLogs = new Set<string>();
 
+  private _getBrowserStorage(): Pick<Storage, 'getItem' | 'setItem'> | null {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    const candidate = (window as Window & { localStorage?: Storage }).localStorage as Partial<Storage> | undefined;
+
+    if (!candidate || typeof candidate.getItem !== 'function' || typeof candidate.setItem !== 'function') {
+      return null;
+    }
+
+    return candidate as Pick<Storage, 'getItem' | 'setItem'>;
+  }
+
   constructor() {
     // Load saved logs from cookies on initialization
     this._loadLogs();
@@ -80,11 +94,13 @@ class LogStore {
   }
 
   private _loadReadLogs() {
-    if (typeof window === 'undefined') {
+    const storage = this._getBrowserStorage();
+
+    if (!storage) {
       return;
     }
 
-    const savedReadLogs = localStorage.getItem('bolt_read_logs');
+    const savedReadLogs = storage.getItem('bolt_read_logs');
 
     if (savedReadLogs) {
       try {
@@ -102,11 +118,13 @@ class LogStore {
   }
 
   private _saveReadLogs() {
-    if (typeof window === 'undefined') {
+    const storage = this._getBrowserStorage();
+
+    if (!storage) {
       return;
     }
 
-    localStorage.setItem('bolt_read_logs', JSON.stringify(Array.from(this._readLogs)));
+    storage.setItem('bolt_read_logs', JSON.stringify(Array.from(this._readLogs)));
   }
 
   private _generateId(): string {
