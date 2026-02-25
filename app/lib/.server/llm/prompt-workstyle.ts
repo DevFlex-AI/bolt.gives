@@ -26,7 +26,12 @@ export function withDevelopmentCommentaryWorkstyle(systemPrompt: string): string
   - After collecting enough web evidence, stop calling web tools and produce the final response/artifact.
   - If the user asks for documentation study output, produce it as a Markdown file using <boltAction type="file">.
   - When you create files, include the exact created file path(s) in your final response so users can find them immediately.
-  - If the user asks to build/run an app, do not stop at scaffolding: install dependencies and include a <boltAction type="start"> so preview can run.
+  - If the user asks to build/run an app, do not stop at scaffolding: include a <boltAction type="start"> so preview can run.
+  - Keep runtime load lightweight in WebContainer:
+    - Avoid \`npm run build\` unless the user explicitly asks for a production build.
+    - Only run install commands when dependencies changed or when \`node_modules\` is missing.
+    - Prefer one install command per run and avoid repeated reinstall loops.
+  - For build requests, do not begin with inspection-only shell commands (ls, pwd, cat, find, tree, env). Start with implementation actions.
   - For file existence checks in shell commands, prefer \`ls <file> >/dev/null 2>&1\` instead of \`test -f\` for terminal compatibility.
   - Never output code changes outside <boltAction type="file"> blocks.
   - Never put file contents, patches, or commands inside progress updates.

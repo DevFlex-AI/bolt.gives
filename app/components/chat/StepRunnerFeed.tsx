@@ -201,7 +201,7 @@ export function StepRunnerFeed(props: StepRunnerFeedProps) {
   const architectEvents = events.filter(isArchitectTimelineEvent).slice(-20);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoFollowRef = useRef(true);
-  const recent = events.filter((event) => !isArchitectTimelineEvent(event)).slice(-96);
+  const recent = events.filter((event) => !isArchitectTimelineEvent(event)).slice(-64);
 
   useEffect(() => {
     const node = timelineRef.current;

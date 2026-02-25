@@ -50,15 +50,86 @@ export interface InteractiveStepRunResult {
 }
 
 const WS_OPEN = 1;
+const STREAM_FLUSH_MS = 300;
+const MAX_STREAM_BUFFER_CHARS = 2400;
+const NOISY_PROGRESS_LINE_RE =
+  /(?:^|\n)\s*(?:progress:\s+resolved|packages:\s+\+|lockfile is up to date|already up to date|resolved \d+, reused \d+).*$/gim;
+
+function normalizeStreamChunk(chunk: string): string {
+  if (!chunk) {
+    return '';
+  }
+
+  return chunk
+    .replace(/\r/g, '\n')
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(NOISY_PROGRESS_LINE_RE, '')
+    .replace(/\n{3,}/g, '\n\n');
+}
 
 export class InteractiveStepRunner extends EventTarget {
   #executor: StepExecutor;
   #socket?: StepEventSocket;
+  #streamBuffer = new Map<string, InteractiveStepRunnerEvent>();
+  #streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(executor: StepExecutor, socket?: StepEventSocket) {
     super();
     this.#executor = executor;
     this.#socket = socket;
+  }
+
+  #streamBufferKey(stepIndex: number, type: 'stdout' | 'stderr'): string {
+    return `${stepIndex}:${type}`;
+  }
+
+  #scheduleStreamFlush() {
+    if (this.#streamFlushTimer) {
+      return;
+    }
+
+    this.#streamFlushTimer = setTimeout(() => {
+      this.#flushStreamBuffer();
+    }, STREAM_FLUSH_MS);
+  }
+
+  #bufferStreamChunk(type: 'stdout' | 'stderr', stepIndex: number, description: string, output: string) {
+    const normalizedChunk = normalizeStreamChunk(output);
+
+    if (!normalizedChunk.trim()) {
+      return;
+    }
+
+    const key = this.#streamBufferKey(stepIndex, type);
+    const existing = this.#streamBuffer.get(key);
+    const nextOutput = `${existing?.output || ''}${normalizedChunk}`.slice(-MAX_STREAM_BUFFER_CHARS);
+
+    this.#streamBuffer.set(key, {
+      type,
+      timestamp: new Date().toISOString(),
+      stepIndex,
+      description,
+      output: nextOutput,
+    });
+    this.#scheduleStreamFlush();
+  }
+
+  #flushStreamBuffer() {
+    if (this.#streamFlushTimer) {
+      clearTimeout(this.#streamFlushTimer);
+      this.#streamFlushTimer = null;
+    }
+
+    if (this.#streamBuffer.size === 0) {
+      return;
+    }
+
+    for (const event of this.#streamBuffer.values()) {
+      this.#emit(event);
+    }
+
+    this.#streamBuffer.clear();
   }
 
   #emit(event: InteractiveStepRunnerEvent) {
@@ -85,24 +156,13 @@ export class InteractiveStepRunner extends EventTarget {
         const result = await this.#executor.executeStep(step, {
           command: step.command,
           onStdout: (chunk) => {
-            this.#emit({
-              type: 'stdout',
-              timestamp: new Date().toISOString(),
-              stepIndex: index,
-              description: step.description,
-              output: chunk,
-            });
+            this.#bufferStreamChunk('stdout', index, step.description, chunk);
           },
           onStderr: (chunk) => {
-            this.#emit({
-              type: 'stderr',
-              timestamp: new Date().toISOString(),
-              stepIndex: index,
-              description: step.description,
-              output: chunk,
-            });
+            this.#bufferStreamChunk('stderr', index, step.description, chunk);
           },
         });
+        this.#flushStreamBuffer();
 
         this.#emit({
           type: 'step-end',
@@ -133,6 +193,8 @@ export class InteractiveStepRunner extends EventTarget {
           };
         }
       } catch (error) {
+        this.#flushStreamBuffer();
+
         const errorMessage = error instanceof Error ? error.message : String(error);
 
         this.#emit({
@@ -151,6 +213,7 @@ export class InteractiveStepRunner extends EventTarget {
       }
     }
 
+    this.#flushStreamBuffer();
     this.#emit({
       type: 'complete',
       timestamp: new Date().toISOString(),

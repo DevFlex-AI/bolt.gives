@@ -89,19 +89,25 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [showDeviceFrameInPreview, setShowDeviceFrameInPreview] = useState(false);
   const expoUrl = useStore(expoUrlAtom);
   const [isExpoQrModalOpen, setIsExpoQrModalOpen] = useState(false);
+  const lastBaseUrlRef = useRef<string | undefined>();
 
   useEffect(() => {
     if (!activePreview) {
       setIframeUrl(undefined);
       setDisplayPath('/');
+      lastBaseUrlRef.current = undefined;
 
       return;
     }
 
     const { baseUrl } = activePreview;
-    setIframeUrl(baseUrl);
-    setDisplayPath('/');
-  }, [activePreview]);
+
+    if (lastBaseUrlRef.current !== baseUrl) {
+      setIframeUrl(baseUrl);
+      setDisplayPath('/');
+      lastBaseUrlRef.current = baseUrl;
+    }
+  }, [activePreview?.baseUrl]);
 
   const findMinPortIndex = useCallback(
     (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {

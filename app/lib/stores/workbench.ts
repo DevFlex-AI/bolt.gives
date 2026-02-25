@@ -33,6 +33,9 @@ import { createScopedLogger } from '~/utils/logger';
 const { saveAs } = fileSaver;
 const logger = createScopedLogger('WorkbenchStore');
 const DEFAULT_ACTION_STREAM_SAMPLE_INTERVAL_MS = 100;
+const MAX_INTERACTIVE_STEP_EVENTS = 140;
+const INTERACTIVE_EVENTS_FLUSH_MS = 220;
+const MAX_INTERACTIVE_EVENT_OUTPUT_CHARS = 1200;
 
 function resolveActionStreamSampleIntervalMs(): number {
   const rawValue = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -90,6 +93,8 @@ export class WorkbenchStore {
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
   #actionDecisions = new Map<string, 'approved' | 'rejected'>();
+  #pendingInteractiveEvents: InteractiveStepRunnerEvent[] = [];
+  #interactiveEventsFlushHandle: ReturnType<typeof setTimeout> | null = null;
   constructor() {
     if (typeof window !== 'undefined') {
       try {
@@ -129,6 +134,101 @@ export class WorkbenchStore {
 
   addToExecutionQueue(callback: () => Promise<void>) {
     this.#globalExecutionQueue = this.#globalExecutionQueue.then(() => callback());
+  }
+
+  #sanitizeInteractiveEvent(event: InteractiveStepRunnerEvent): InteractiveStepRunnerEvent {
+    const sanitized: InteractiveStepRunnerEvent = { ...event };
+
+    if (typeof sanitized.output === 'string' && sanitized.output.length > MAX_INTERACTIVE_EVENT_OUTPUT_CHARS) {
+      sanitized.output = sanitized.output.slice(-MAX_INTERACTIVE_EVENT_OUTPUT_CHARS);
+    }
+
+    if (typeof sanitized.error === 'string' && sanitized.error.length > MAX_INTERACTIVE_EVENT_OUTPUT_CHARS) {
+      sanitized.error = sanitized.error.slice(-MAX_INTERACTIVE_EVENT_OUTPUT_CHARS);
+    }
+
+    return sanitized;
+  }
+
+  #mergeInteractiveEvent(
+    existing: InteractiveStepRunnerEvent[],
+    incoming: InteractiveStepRunnerEvent,
+  ): InteractiveStepRunnerEvent[] {
+    if (existing.length === 0) {
+      return [incoming];
+    }
+
+    const last = existing[existing.length - 1];
+
+    if (
+      (incoming.type === 'stdout' || incoming.type === 'stderr') &&
+      last.type === incoming.type &&
+      last.stepIndex === incoming.stepIndex
+    ) {
+      const mergedOutput = `${last.output || ''}${last.output ? '\n' : ''}${incoming.output || ''}`.slice(
+        -MAX_INTERACTIVE_EVENT_OUTPUT_CHARS,
+      );
+
+      const mergedEvent: InteractiveStepRunnerEvent = {
+        ...last,
+        timestamp: incoming.timestamp,
+        output: mergedOutput,
+      };
+
+      return [...existing.slice(0, -1), mergedEvent];
+    }
+
+    if (
+      incoming.type === 'telemetry' &&
+      last.type === 'telemetry' &&
+      (incoming.output || '') === (last.output || '') &&
+      (incoming.description || '') === (last.description || '')
+    ) {
+      return [...existing.slice(0, -1), { ...last, timestamp: incoming.timestamp }];
+    }
+
+    return [...existing, incoming];
+  }
+
+  #flushInteractiveEvents() {
+    if (this.#interactiveEventsFlushHandle) {
+      clearTimeout(this.#interactiveEventsFlushHandle);
+      this.#interactiveEventsFlushHandle = null;
+    }
+
+    if (this.#pendingInteractiveEvents.length === 0) {
+      return;
+    }
+
+    let next = [...this.interactiveStepEvents.get()];
+
+    for (const pending of this.#pendingInteractiveEvents) {
+      next = this.#mergeInteractiveEvent(next, this.#sanitizeInteractiveEvent(pending));
+    }
+
+    this.#pendingInteractiveEvents = [];
+    this.interactiveStepEvents.set(next.slice(-MAX_INTERACTIVE_STEP_EVENTS));
+  }
+
+  #scheduleInteractiveEventsFlush() {
+    if (this.#interactiveEventsFlushHandle) {
+      return;
+    }
+
+    this.#interactiveEventsFlushHandle = setTimeout(() => {
+      this.#flushInteractiveEvents();
+    }, INTERACTIVE_EVENTS_FLUSH_MS);
+  }
+
+  #appendInteractiveStepEvent(event: InteractiveStepRunnerEvent) {
+    this.#pendingInteractiveEvents.push(event);
+
+    if (event.type === 'stdout' || event.type === 'stderr' || event.type === 'telemetry') {
+      this.#scheduleInteractiveEventsFlush();
+      return;
+    }
+
+    this.#flushInteractiveEvents();
   }
 
   get previews() {
@@ -201,6 +301,12 @@ export class WorkbenchStore {
   }
 
   clearStepRunnerEvents() {
+    if (this.#interactiveEventsFlushHandle) {
+      clearTimeout(this.#interactiveEventsFlushHandle);
+      this.#interactiveEventsFlushHandle = null;
+    }
+
+    this.#pendingInteractiveEvents = [];
     this.interactiveStepEvents.set([]);
   }
 
@@ -600,7 +706,7 @@ export class WorkbenchStore {
       error: `Aborted ${abortedActions} action${abortedActions === 1 ? '' : 's'} by user request.`,
     };
 
-    this.interactiveStepEvents.set([...this.interactiveStepEvents.get(), abortEvent].slice(-200));
+    this.#appendInteractiveStepEvent(abortEvent);
   }
 
   setReloadedMessages(messages: string[]) {
@@ -652,7 +758,7 @@ export class WorkbenchStore {
             return;
           }
 
-          this.interactiveStepEvents.set([...this.interactiveStepEvents.get(), event].slice(-200));
+          this.#appendInteractiveStepEvent(event);
         },
       ),
     });
@@ -914,7 +1020,7 @@ export class WorkbenchStore {
 
       runner.addEventListener('event', (event) => {
         const detail = (event as CustomEvent<InteractiveStepRunnerEvent>).detail;
-        this.interactiveStepEvents.set([...this.interactiveStepEvents.get(), detail].slice(-250));
+        this.#appendInteractiveStepEvent(detail);
       });
 
       await runner.run(steps);

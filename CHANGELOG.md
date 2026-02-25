@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.3.1 (2026-02-25)
+
+### Fixed
+- Reduced browser freeze risk during long coding runs by batching interactive step events before UI state updates, including merge/dedupe logic for repeated stdout/stderr/telemetry bursts.
+- Reduced preview thrash by disabling costly cross-tab preview/storage sync loops by default and preventing forced iframe reload cycles.
+- Lowered noisy terminal stream pressure by normalizing ANSI/progress spam and throttling package-manager progress chatter in action timelines.
+- Prevented unnecessary preview resets by only resetting iframe URL/path when the preview base URL actually changes.
+- Trimmed non-architect timeline window size to lower render pressure on constrained client machines.
+
+### Changed
+- Updated prompt workstyle guidance to avoid unnecessary heavy commands in WebContainer sessions (for example repeated install/build loops) unless explicitly requested.
+- Updated app and package version to `1.0.3.1`.
+
 ## v1.0.3 (2026-02-20)
 
 ### Added

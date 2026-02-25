@@ -55,7 +55,7 @@ describe('StepRunnerFeed', () => {
 
     expect(screen.queryByText('Execution Timeline')).toBeTruthy();
     expect(screen.queryByText('step-1')).toBeNull();
-    expect(screen.queryByText('step-11')).toBeTruthy();
+    expect(screen.queryByText('step-107')).toBeTruthy();
   });
 
   it('clears events when the clear button is clicked', () => {

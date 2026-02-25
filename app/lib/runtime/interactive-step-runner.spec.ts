@@ -74,6 +74,42 @@ describe('InteractiveStepRunner', () => {
     expect(sentEvents.map((event) => event.type)).toEqual(['step-start', 'stdout', 'stderr', 'step-end', 'complete']);
   });
 
+  it('coalesces repeated stdout/stderr chunks before emitting', async () => {
+    const runner = new InteractiveStepRunner({
+      async executeStep(_step, context) {
+        context.onStdout('hello');
+        context.onStdout(' world');
+        context.onStderr('warn');
+        context.onStderr(': details');
+
+        return {
+          exitCode: 0,
+          stdout: 'ok',
+          stderr: '',
+        };
+      },
+    });
+    const streamedEvents: Array<{ type: string; output?: string }> = [];
+
+    runner.addEventListener('event', (event) => {
+      const detail = (event as CustomEvent<{ type: string; output?: string }>).detail;
+
+      if (detail.type === 'stdout' || detail.type === 'stderr') {
+        streamedEvents.push(detail);
+      }
+    });
+
+    const result = await runner.run([{ description: 'stream', command: ['echo', 'stream'] }]);
+    const stdoutEvents = streamedEvents.filter((event) => event.type === 'stdout');
+    const stderrEvents = streamedEvents.filter((event) => event.type === 'stderr');
+
+    expect(result.status).toBe('complete');
+    expect(stdoutEvents).toHaveLength(1);
+    expect(stderrEvents).toHaveLength(1);
+    expect(stdoutEvents[0]?.output).toBe('hello world');
+    expect(stderrEvents[0]?.output).toBe('warn: details');
+  });
+
   it('stops immediately on non-zero exit code and emits error', async () => {
     let executions = 0;
     const { runner, events } = createRunner({

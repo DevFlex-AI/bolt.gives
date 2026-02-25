@@ -6,6 +6,7 @@ describe('withDevelopmentCommentaryWorkstyle', () => {
     const prompt = withDevelopmentCommentaryWorkstyle('Base prompt');
 
     expect(prompt).toContain('If the user asks to build/run an app');
+    expect(prompt).toContain('do not begin with inspection-only shell commands');
     expect(prompt).toContain('ls <file> >/dev/null 2>&1');
     expect(prompt).toContain('include the exact created file path');
   });

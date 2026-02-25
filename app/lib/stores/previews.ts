@@ -16,23 +16,24 @@ export interface PreviewInfo {
 
 // Create a broadcast channel for preview updates
 const PREVIEW_CHANNEL = 'preview-updates';
+const ENABLE_PREVIEW_CROSS_TAB_SYNC = false;
+const ENABLE_PREVIEW_STORAGE_SYNC = false;
 
 export class PreviewsStore {
   #availablePreviews = new Map<number, PreviewInfo>();
   #webcontainer: Promise<WebContainer>;
   #broadcastChannel?: BroadcastChannel;
   #lastUpdate = new Map<string, number>();
-  #watchedFiles = new Set<string>();
   #refreshTimeouts = new Map<string, NodeJS.Timeout>();
-  #REFRESH_DELAY = 300;
+  #REFRESH_DELAY = 800;
   #storageChannel?: BroadcastChannel;
 
   previews = atom<PreviewInfo[]>([]);
 
   constructor(webcontainerPromise: Promise<WebContainer>) {
     this.#webcontainer = webcontainerPromise;
-    this.#broadcastChannel = this.#maybeCreateChannel(PREVIEW_CHANNEL);
-    this.#storageChannel = this.#maybeCreateChannel('storage-sync-channel');
+    this.#broadcastChannel = ENABLE_PREVIEW_CROSS_TAB_SYNC ? this.#maybeCreateChannel(PREVIEW_CHANNEL) : undefined;
+    this.#storageChannel = ENABLE_PREVIEW_STORAGE_SYNC ? this.#maybeCreateChannel('storage-sync-channel') : undefined;
 
     if (this.#broadcastChannel) {
       // Listen for preview updates from other tabs
@@ -63,7 +64,7 @@ export class PreviewsStore {
     }
 
     // Override localStorage setItem to catch all changes
-    if (typeof window !== 'undefined') {
+    if (ENABLE_PREVIEW_STORAGE_SYNC && typeof window !== 'undefined') {
       const originalSetItem = localStorage.setItem;
 
       localStorage.setItem = (...args) => {
@@ -123,29 +124,16 @@ export class PreviewsStore {
         }
       });
 
-      // Force a refresh after syncing storage
-      const previews = this.previews.get();
-      previews.forEach((preview) => {
-        const previewId = this.getPreviewId(preview.baseUrl);
-
-        if (previewId) {
-          this.refreshPreview(previewId);
-        }
-      });
-
-      // Reload the page content
-      if (typeof window !== 'undefined' && window.location) {
-        const iframe = document.querySelector('iframe');
-
-        if (iframe) {
-          iframe.src = iframe.src;
-        }
-      }
+      // Do not force iframe reloads here. Browser-level reload loops can freeze the UI.
     }
   }
 
   // Broadcast storage state to other tabs
   private _broadcastStorageSync() {
+    if (!ENABLE_PREVIEW_STORAGE_SYNC || typeof window === 'undefined') {
+      return;
+    }
+
     if (typeof window !== 'undefined') {
       const storage: Record<string, string> = {};
 
@@ -175,7 +163,9 @@ export class PreviewsStore {
       this.broadcastUpdate(url);
 
       // Initial storage sync when preview is ready
-      this._broadcastStorageSync();
+      if (ENABLE_PREVIEW_STORAGE_SYNC) {
+        this._broadcastStorageSync();
+      }
     });
 
     // Listen for port events
@@ -285,6 +275,10 @@ export class PreviewsStore {
   }
 
   refreshAllPreviews() {
+    if (!ENABLE_PREVIEW_CROSS_TAB_SYNC) {
+      return;
+    }
+
     const previews = this.previews.get();
 
     for (const preview of previews) {

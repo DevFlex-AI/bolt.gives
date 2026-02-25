@@ -21,6 +21,16 @@ import {
 } from './shell-command-utils';
 
 const logger = createScopedLogger('ActionRunner');
+const NOISY_PACKAGE_PROGRESS_RE =
+  /(?:progress:\s+resolved|packages:\s+\+|lockfile is up to date|already up to date|resolved \d+, reused \d+)/i;
+const HEAVY_COMMAND_RE = /\b(?:pnpm|npm|yarn|bun)\s+(?:install|i|run\s+build|build)\b/i;
+
+function normalizeShellChunkForTimeline(chunk: string): string {
+  return chunk
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\r/g, '\n');
+}
 
 export type ActionStatus = 'pending' | 'running' | 'complete' | 'aborted' | 'failed';
 
@@ -292,6 +302,8 @@ export class ActionRunner {
     let finalOutput = '';
     let finalExitCode = 0;
     let stepError: string | undefined;
+    const heavyCommand = HEAVY_COMMAND_RE.test(action.content);
+    const streamState = { lastProgressEmitAt: 0 };
 
     const stepSocket = this.#getStepEventSocket();
     const stepRunner = new InteractiveStepRunner(
@@ -305,7 +317,26 @@ export class ActionRunner {
               action.abort();
             },
             (chunk) => {
-              context.onStdout(chunk);
+              const normalized = normalizeShellChunkForTimeline(chunk);
+
+              if (!normalized.trim()) {
+                return;
+              }
+
+              if (heavyCommand && NOISY_PACKAGE_PROGRESS_RE.test(normalized)) {
+                const now = Date.now();
+
+                if (now - streamState.lastProgressEmitAt < 2500) {
+                  return;
+                }
+
+                streamState.lastProgressEmitAt = now;
+                context.onStdout('[install progress]');
+
+                return;
+              }
+
+              context.onStdout(normalized);
             },
           );
           const output = resp?.output || '';
