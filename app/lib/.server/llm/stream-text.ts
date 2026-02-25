@@ -29,6 +29,9 @@ export interface StreamingOptions extends Omit<Parameters<typeof _streamText>[0]
 }
 
 const logger = createScopedLogger('stream-text');
+const LONG_THINK_MODEL_RE =
+  /\b(gpt-5|gpt-5\.2|gpt-5-codex|codex|o1|o3|claude-3\.7|claude-3\.5-sonnet-latest|claude-3-5-sonnet-latest)\b/i;
+const LONG_THINK_BUILD_MAX_COMPLETION_TOKENS = 6000;
 
 function getCompletionTokenLimit(modelDetails: any): number {
   // 1. If model specifies completion tokens, use that
@@ -159,13 +162,6 @@ export async function streamText(props: {
 
   const dynamicMaxTokens = modelDetails ? getCompletionTokenLimit(modelDetails) : Math.min(MAX_TOKENS, 16384);
 
-  // Use model-specific limits directly - no artificial cap needed
-  const safeMaxTokens = dynamicMaxTokens;
-
-  logger.info(
-    `Token limits for model ${modelDetails.name}: maxTokens=${safeMaxTokens}, maxTokenAllowed=${modelDetails.maxTokenAllowed}, maxCompletionTokens=${modelDetails.maxCompletionTokens}`,
-  );
-
   const effectiveChatMode = chatMode || 'build';
   const effectivePromptId = resolvePromptIdForModel({
     promptId,
@@ -187,6 +183,17 @@ export async function streamText(props: {
     }) ?? getSystemPrompt();
 
   systemPrompt = withDevelopmentCommentaryWorkstyle(systemPrompt);
+
+  if (effectiveChatMode === 'build') {
+    systemPrompt = `${systemPrompt}
+
+    OUTPUT CONTRACT (required):
+    1) Start your response with executable <boltAction> steps inside a single <boltArtifact>.
+    2) Do not open with plan-only prose.
+    3) Continue from the existing workspace/project state; do not re-scaffold when files already exist.
+    4) Include a <boltAction type="start"> command when the task expects preview/runtime output.
+    `;
+  }
 
   if (effectiveChatMode === 'build' && contextFiles && contextOptimization) {
     const codeContext = createFilesContext(contextFiles, true);
@@ -271,6 +278,16 @@ export async function streamText(props: {
   } else {
     console.log('No locked files found from any source for prompt.');
   }
+
+  const isLongThinkBuild =
+    effectiveChatMode === 'build' && LONG_THINK_MODEL_RE.test(modelDetails?.name || currentModel || '');
+  const safeMaxTokens = isLongThinkBuild
+    ? Math.min(dynamicMaxTokens, LONG_THINK_BUILD_MAX_COMPLETION_TOKENS)
+    : dynamicMaxTokens;
+
+  logger.info(
+    `Token limits for model ${modelDetails.name}: maxTokens=${safeMaxTokens}, maxTokenAllowed=${modelDetails.maxTokenAllowed}, maxCompletionTokens=${modelDetails.maxCompletionTokens}`,
+  );
 
   logger.info(`Sending llm call to ${provider.name} with model ${modelDetails.name}`);
 

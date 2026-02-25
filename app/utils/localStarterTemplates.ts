@@ -11,6 +11,7 @@ type LocalTemplateFallback = {
   stackLabel: string;
   installCommand?: string;
   startCommand?: string;
+  starterFilesPreloaded?: boolean;
 };
 
 const LOCAL_TEMPLATE_FALLBACKS: Record<string, LocalTemplateFallback> = {
@@ -71,6 +72,7 @@ const LOCAL_TEMPLATE_FALLBACKS: Record<string, LocalTemplateFallback> = {
     stackLabel: 'Vite + React + TypeScript',
     installCommand: 'pnpm install',
     startCommand: 'pnpm run dev',
+    starterFilesPreloaded: true,
   },
   'Node Express API': {
     scaffoldCommand:
@@ -291,20 +293,28 @@ Scaffold command: \`${fallback.scaffoldCommand}\`
 }
 
 function toPrompt(template: Template, fallback: LocalTemplateFallback): string {
+  const scaffoldInstruction = fallback.starterFilesPreloaded
+    ? `1) Starter files are already preloaded locally. Do NOT run a scaffold command.
+2) Implement the user's requested features immediately by editing application files.`
+    : `1) Scaffold the project with:
+\`${fallback.scaffoldCommand}\`
+2) Implement the user's requested features immediately after scaffolding.`;
+
   return `The remote starter template for "${template.name}" is temporarily unavailable.
 Use the built-in fallback flow below and continue automatically in plain English.
 
 Required execution steps:
-1) Scaffold the project with:
-\`${fallback.scaffoldCommand}\`
-2) Install dependencies if needed.
-3) Start the dev server.
-4) If any command fails, recover automatically by retrying with safe defaults.
-5) Keep commentary simple and user-friendly. Avoid technical jargon unless explicitly requested.
+${scaffoldInstruction}
+3) Install dependencies if needed.
+4) Start the dev server.
+5) Implement the full user request, not just a starter shell.
+6) If any command fails, recover automatically by retrying with safe defaults.
+7) Keep commentary simple and user-friendly. Avoid technical jargon unless explicitly requested.
 
 Success criteria:
-- A runnable starter app is created.
-- The preview starts successfully.
+- The user's requested app is implemented beyond the starter baseline.
+- The preview starts successfully with the implemented features visible.
+- The fallback placeholder UI text is replaced when feature implementation begins.
 - The user receives concise status updates while work is in progress.
 `;
 }

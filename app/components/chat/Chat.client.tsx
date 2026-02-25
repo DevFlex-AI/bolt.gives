@@ -4,6 +4,7 @@ import { useChat } from '@ai-sdk/react';
 import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
+import { flushSync } from 'react-dom';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
@@ -15,7 +16,7 @@ import { BaseChat } from './BaseChat';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
-import type { ProviderInfo } from '~/types/model';
+import type { IProviderSetting, ProviderInfo } from '~/types/model';
 import { useSearchParams } from '@remix-run/react';
 import { createSampler } from '~/utils/sampler';
 import { getTemplates, selectStarterTemplate } from '~/utils/selectStarterTemplate';
@@ -47,6 +48,7 @@ import {
   resolvePreferredModelName,
 } from '~/lib/runtime/model-selection';
 import { normalizeUsageEvent } from '~/lib/runtime/cost-estimation';
+import { normalizeCredential } from '~/lib/runtime/credentials';
 import {
   ARCHITECT_NAME,
   buildArchitectAutoHealPrompt,
@@ -60,6 +62,7 @@ import {
   type AgentPlanStep,
 } from '~/lib/runtime/agent-workflow';
 import type { InteractiveStepRunnerEvent } from '~/lib/runtime/interactive-step-runner';
+import { getLastMeaningfulProgressTimestamp } from '~/lib/runtime/stall-progress';
 import {
   computeTextFileDelta,
   computeTextSnapshotRevertOps,
@@ -74,10 +77,33 @@ import { requestLikelyNeedsMutatingActions } from '~/lib/runtime/mutating-intent
 const logger = createScopedLogger('Chat');
 const PROJECT_MEMORY_STORAGE_KEY = 'bolt_project_memory_v1';
 const CHAT_SELECTION_COOKIE_EXPIRY_DAYS = 365;
-const MAX_CHAT_DATA_EVENTS = 320;
-const MAX_STEP_RUNNER_EVENTS = 320;
-const TELEMETRY_SAMPLE_MS = 15000;
-const TELEMETRY_OUTPUT_MAX_CHARS = 3000;
+const MAX_CHAT_DATA_EVENTS = 140;
+const MAX_STEP_RUNNER_EVENTS = 96;
+const TELEMETRY_SAMPLE_MS = 10000;
+const TELEMETRY_EMIT_INTERVAL_MS = 60000;
+const STEP_EVENT_FLUSH_MS = 250;
+const TELEMETRY_OUTPUT_MAX_CHARS = 1600;
+const TELEMETRY_MERGE_WINDOW_MS = 20000;
+const DEFAULT_STALL_WARNING_THRESHOLD_MS = 45000;
+const DEFAULT_STALL_RECOVERY_THRESHOLD_MS = 60000;
+const AUTO_CONTINUATION_LIMIT = 3;
+const LOCAL_PROVIDER_SET = new Set<string>(LOCAL_PROVIDERS);
+const LONG_THINK_MODEL_RE =
+  /\b(gpt-5|gpt-5\.2|gpt-5-codex|codex|o1|o3|claude-3\.7|claude-3\.5-sonnet-latest|claude-3-5-sonnet-latest)\b/i;
+
+function resolveStallPolicy(modelName?: string): { warningMs: number; recoveryMs: number } {
+  if (modelName && LONG_THINK_MODEL_RE.test(modelName)) {
+    return {
+      warningMs: 90000,
+      recoveryMs: 150000,
+    };
+  }
+
+  return {
+    warningMs: DEFAULT_STALL_WARNING_THRESHOLD_MS,
+    recoveryMs: DEFAULT_STALL_RECOVERY_THRESHOLD_MS,
+  };
+}
 
 type StoredProjectMemory = ProjectMemoryDataEvent | null;
 type ApiKeysUpdatePayload = {
@@ -115,6 +141,22 @@ function getApiKeysFromCookiesSafe(): Record<string, string> {
   return parseApiKeysCookie(Cookies.get('apiKeys'));
 }
 
+function getProviderSettingsFromCookiesSafe(): Record<string, IProviderSetting> {
+  try {
+    const raw = Cookies.get('providers');
+
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, IProviderSetting>;
+
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function resolveProviderInfo(providerName: string | undefined): ProviderInfo {
   return (PROVIDER_LIST.find((provider) => provider.name === providerName) || DEFAULT_PROVIDER) as ProviderInfo;
 }
@@ -134,29 +176,166 @@ async function fetchProviderModels(providerName: string): Promise<ModelInfo[]> {
   }
 }
 
-function appendStepRunnerEvent(event: InteractiveStepRunnerEvent) {
-  const current = workbenchStore.stepRunnerEvents.get();
-  const last = current[current.length - 1];
+let bufferedStepRunnerEvents: InteractiveStepRunnerEvent[] = [];
+let stepRunnerFlushHandle: ReturnType<typeof setTimeout> | null = null;
 
-  if (
-    last &&
-    (event.type === 'stdout' || event.type === 'stderr') &&
-    last.type === event.type &&
-    last.stepIndex === event.stepIndex
-  ) {
-    const mergedOutput = `${last.output || ''}${event.output || ''}`.slice(-TELEMETRY_OUTPUT_MAX_CHARS);
+function sanitizeStepRunnerOutput(output: string | undefined): string | undefined {
+  if (!output) {
+    return output;
+  }
+
+  return (
+    output
+      // Remove escaped OSC/CSI fragments that can appear in JSON-escaped output
+      .replace(/\\u001b\][^\\]*(?:\\u0007|\\u001b\\\\)/g, '')
+      .replace(/\\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      // Remove raw CSI/OSC sequences
+      .replace(/\u009b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+      .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      // Remove residual ANSI fragments left after ESC stripping (e.g. [39m, [?25h, ]654;pid=...)
+      .replace(/\[[0-9;?]{1,16}[A-Za-z]/g, ' ')
+      .replace(/\][0-9]{1,6};[A-Za-z0-9=:+._-]*/g, ' ')
+      .replace(/\[\?[0-9;]{1,16}[A-Za-z]/g, ' ')
+      .replace(/\[(?:\d{1,3};)*\d{1,3}m/g, ' ')
+      .replace(/\\r/g, '')
+      .replace(/\\n/g, '\n')
+      .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim()
+  );
+}
+
+function sanitizeStepRunnerEvent(event: InteractiveStepRunnerEvent): InteractiveStepRunnerEvent {
+  const cleanedOutput = sanitizeStepRunnerOutput(event.output);
+
+  if (cleanedOutput === event.output) {
+    return event;
+  }
+
+  return {
+    ...event,
+    output: cleanedOutput,
+  };
+}
+
+function findMergeableStreamIndex(events: InteractiveStepRunnerEvent[], incoming: InteractiveStepRunnerEvent): number {
+  if (incoming.type !== 'stdout' && incoming.type !== 'stderr') {
+    return -1;
+  }
+
+  for (let index = events.length - 1; index >= 0; index--) {
+    const candidate = events[index];
+
+    if (candidate.stepIndex !== incoming.stepIndex) {
+      continue;
+    }
+
+    if (candidate.type === 'step-end' || candidate.type === 'error' || candidate.type === 'complete') {
+      break;
+    }
+
+    if (candidate.type === incoming.type) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function mergeOrAppendStepRunnerEvent(
+  events: InteractiveStepRunnerEvent[],
+  event: InteractiveStepRunnerEvent,
+): InteractiveStepRunnerEvent[] {
+  const normalizedEvent = sanitizeStepRunnerEvent(event);
+
+  if (events.length === 0) {
+    return [normalizedEvent];
+  }
+
+  const last = events[events.length - 1];
+  const streamMergeIndex = findMergeableStreamIndex(events, normalizedEvent);
+
+  if (streamMergeIndex >= 0) {
+    const target = events[streamMergeIndex];
+    const mergedOutput = `${target.output || ''}${target.output ? '\n' : ''}${normalizedEvent.output || ''}`.slice(
+      -TELEMETRY_OUTPUT_MAX_CHARS,
+    );
     const mergedEvent: InteractiveStepRunnerEvent = {
-      ...last,
-      timestamp: event.timestamp,
+      ...target,
+      timestamp: normalizedEvent.timestamp,
       output: mergedOutput,
     };
+    const next = [...events];
+    next[streamMergeIndex] = mergedEvent;
 
-    workbenchStore.stepRunnerEvents.set([...current.slice(0, -1), mergedEvent].slice(-MAX_STEP_RUNNER_EVENTS));
+    return next;
+  }
 
+  const isDuplicateTelemetry =
+    normalizedEvent.type === 'telemetry' &&
+    last.type === 'telemetry' &&
+    (last.output || '') === (normalizedEvent.output || '') &&
+    (last.description || '') === (normalizedEvent.description || '');
+
+  if (isDuplicateTelemetry) {
+    return [...events.slice(0, -1), { ...last, timestamp: normalizedEvent.timestamp }];
+  }
+
+  if (normalizedEvent.type === 'telemetry' && last.type === 'telemetry') {
+    const lastTimestamp = Date.parse(last.timestamp || '');
+    const nextTimestamp = Date.parse(normalizedEvent.timestamp || '');
+    const distance =
+      Number.isFinite(lastTimestamp) && Number.isFinite(nextTimestamp) ? nextTimestamp - lastTimestamp : 0;
+
+    if (distance < TELEMETRY_MERGE_WINDOW_MS) {
+      return [...events.slice(0, -1), { ...last, ...normalizedEvent }];
+    }
+  }
+
+  return [...events, normalizedEvent];
+}
+
+function flushBufferedStepRunnerEvents() {
+  if (stepRunnerFlushHandle) {
+    clearTimeout(stepRunnerFlushHandle);
+    stepRunnerFlushHandle = null;
+  }
+
+  if (bufferedStepRunnerEvents.length === 0) {
     return;
   }
 
-  workbenchStore.stepRunnerEvents.set([...current, event].slice(-MAX_STEP_RUNNER_EVENTS));
+  const current = workbenchStore.stepRunnerEvents.get();
+  let next = [...current];
+
+  for (const event of bufferedStepRunnerEvents) {
+    next = mergeOrAppendStepRunnerEvent(next, event);
+  }
+
+  bufferedStepRunnerEvents = [];
+  workbenchStore.stepRunnerEvents.set(next.slice(-MAX_STEP_RUNNER_EVENTS));
+}
+
+function scheduleBufferedStepRunnerFlush() {
+  if (stepRunnerFlushHandle) {
+    return;
+  }
+
+  stepRunnerFlushHandle = setTimeout(() => {
+    flushBufferedStepRunnerEvents();
+  }, STEP_EVENT_FLUSH_MS);
+}
+
+function appendStepRunnerEvent(event: InteractiveStepRunnerEvent) {
+  bufferedStepRunnerEvents.push(event);
+
+  if (event.type === 'stdout' || event.type === 'stderr' || event.type === 'telemetry') {
+    scheduleBufferedStepRunnerFlush();
+    return;
+  }
+
+  flushBufferedStepRunnerEvents();
 }
 
 function appendArchitectTimelineEvent(event: Omit<InteractiveStepRunnerEvent, 'timestamp'>) {
@@ -245,6 +424,10 @@ export const ChatImpl = memo(
       const savedProvider = Cookies.get('selectedProvider');
       return resolveProviderInfo(savedProvider);
     });
+    const runContextRef = useRef<{ model: string; providerName: string }>({
+      model,
+      providerName: provider.name,
+    });
     const { showChat } = useStore(chatStore);
     const autonomyMode = useStore(workbenchStore.autonomyMode);
     const [animationScope, animate] = useAnimate();
@@ -261,9 +444,17 @@ export const ChatImpl = memo(
     const selectionBootstrapRef = useRef(false);
     const architectAttemptCountsRef = useRef<Record<string, number>>({});
     const architectInFlightRef = useRef(false);
+    const providerEnvKeyStatusRef = useRef<Record<string, boolean>>({});
     const mcpSettings = useMCPStore((state) => state.settings);
     const mcpInitialized = useMCPStore((state) => state.isInitialized);
     const initializeMcp = useMCPStore((state) => state.initialize);
+
+    useEffect(() => {
+      runContextRef.current = {
+        model,
+        providerName: provider.name,
+      };
+    }, [model, provider.name]);
 
     useEffect(() => {
       if (!mcpInitialized) {
@@ -289,6 +480,9 @@ export const ChatImpl = memo(
       api: '/api/chat',
       body: {
         apiKeys,
+        providerSettings: getProviderSettingsFromCookiesSafe(),
+        selectedProvider: provider.name,
+        selectedModel: model,
         files,
         promptId,
         contextOptimization: contextOptimizationEnabled,
@@ -314,13 +508,14 @@ export const ChatImpl = memo(
         const normalizedUsage = normalizeUsageEvent(response.usage);
 
         if (normalizedUsage) {
+          const activeRunContext = runContextRef.current;
           setLatestUsage(normalizedUsage);
           recordTokenUsage(normalizedUsage);
           logStore.logProvider('Chat response completed', {
             component: 'Chat',
             action: 'response',
-            model,
-            provider: provider.name,
+            model: activeRunContext.model,
+            provider: activeRunContext.providerName,
             usage: normalizedUsage,
             messageLength: message.content.length,
           });
@@ -335,6 +530,167 @@ export const ChatImpl = memo(
     const boundedChatData = useMemo(() => (chatData || []).slice(-MAX_CHAT_DATA_EVENTS), [chatData]);
     const lastDataEventAtRef = useRef(Date.now());
     const stallReportedRef = useRef(false);
+    const stallRecoveryTriggeredRef = useRef(false);
+    const lastTelemetryEmitAtRef = useRef(0);
+    const latestUserRequestRef = useRef('');
+    const requestLifecycleStartedAtRef = useRef(Date.now());
+    const pendingStarterContinuationRef = useRef<string | null>(null);
+    const starterContinuationTriggeredRef = useRef(false);
+    const autoContinuationCountRef = useRef(0);
+    const isLoadingRef = useRef(isLoading);
+    const fakeLoadingRef = useRef(fakeLoading);
+
+    useEffect(() => {
+      isLoadingRef.current = isLoading;
+    }, [isLoading]);
+
+    useEffect(() => {
+      fakeLoadingRef.current = fakeLoading;
+    }, [fakeLoading]);
+
+    const appendHiddenContinuation = useCallback(
+      (args: { idSuffix: string; content: string; failureDescription: string; successDescription?: string }) => {
+        const maxAttempts = 4;
+
+        const attemptDispatch = (attempt: number) => {
+          const initialBusy = isLoadingRef.current || fakeLoadingRef.current;
+          const delayMs = attempt === 1 ? (initialBusy ? 350 : 0) : Math.min(2200, attempt * 550);
+
+          window.setTimeout(() => {
+            append({
+              id: `${Date.now()}-${args.idSuffix}`,
+              role: 'user',
+              content: args.content,
+              annotations: ['hidden'],
+            })
+              .then(() => {
+                if (args.successDescription) {
+                  appendStepRunnerEvent({
+                    type: 'telemetry',
+                    timestamp: new Date().toISOString(),
+                    description: args.successDescription,
+                    output: `attempt=${attempt}/${maxAttempts}`,
+                  });
+                }
+              })
+              .catch((dispatchError) => {
+                appendStepRunnerEvent({
+                  type: 'error',
+                  timestamp: new Date().toISOString(),
+                  description: `${args.failureDescription} (attempt ${attempt}/${maxAttempts})`,
+                  error: dispatchError instanceof Error ? dispatchError.message : 'Unknown continuation dispatch error',
+                });
+
+                if (attempt < maxAttempts) {
+                  attemptDispatch(attempt + 1);
+                }
+              });
+          }, delayMs);
+        };
+
+        attemptDispatch(1);
+      },
+      [append],
+    );
+
+    const dispatchAutoContinuation = useCallback(
+      (
+        reason: 'starter-followup' | 'stall-recovery' | 'timeout-recovery',
+        args: { idSuffix: string; content: string; failureDescription: string; successDescription?: string },
+      ) => {
+        if (autoContinuationCountRef.current >= AUTO_CONTINUATION_LIMIT) {
+          appendStepRunnerEvent({
+            type: 'error',
+            timestamp: new Date().toISOString(),
+            description: `Auto continuation cap reached (${AUTO_CONTINUATION_LIMIT})`,
+            error: `Stopped auto continuation loop for ${reason}`,
+            output: 'Please continue manually if you want to proceed from the current workspace state.',
+          });
+
+          return false;
+        }
+
+        autoContinuationCountRef.current += 1;
+        appendStepRunnerEvent({
+          type: 'telemetry',
+          timestamp: new Date().toISOString(),
+          description: 'Auto continuation dispatched',
+          output: `reason=${reason} attempt=${autoContinuationCountRef.current}/${AUTO_CONTINUATION_LIMIT}`,
+        });
+        appendHiddenContinuation(args);
+
+        return true;
+      },
+      [appendHiddenContinuation],
+    );
+
+    const dispatchStarterContinuation = useCallback(
+      (reason: 'stream-finished' | 'stream-stalled') => {
+        const pendingOriginalRequest = pendingStarterContinuationRef.current;
+        const activeRunContext = runContextRef.current;
+
+        if (!pendingOriginalRequest || starterContinuationTriggeredRef.current) {
+          return false;
+        }
+
+        pendingStarterContinuationRef.current = null;
+        starterContinuationTriggeredRef.current = true;
+
+        const normalizedRequest = pendingOriginalRequest.trim() || latestUserRequestRef.current.trim();
+
+        if (!normalizedRequest) {
+          return false;
+        }
+
+        const continuationPrompt = buildModelSelectionEnvelope({
+          model: activeRunContext.model,
+          providerName: activeRunContext.providerName,
+          selectionReason:
+            reason === 'stream-stalled'
+              ? 'Starter bootstrap stalled. Continuing with the user request.'
+              : 'Starter bootstrap completed. Continuing with the user request.',
+          content: `Starter bootstrap is complete. Continue implementing the original request now (do not stop at scaffold/start).
+Original request:
+${normalizedRequest}
+
+Requirements:
+1) Continue from the existing files and runtime state.
+2) Implement the requested features fully.
+3) Keep preview running and verify the output.
+4) Your first output must be actionable <boltAction> steps (do not respond with plan-only prose).
+5) Finish with a concise completion summary plus any remaining gaps.`,
+        });
+
+        appendStepRunnerEvent({
+          type: 'telemetry',
+          timestamp: new Date().toISOString(),
+          description:
+            reason === 'stream-stalled'
+              ? 'Dispatching hidden continuation after starter stall'
+              : 'Dispatching hidden continuation after starter bootstrap',
+          output: `provider=${activeRunContext.providerName} model=${activeRunContext.model}`,
+        });
+
+        requestLifecycleStartedAtRef.current = Date.now();
+
+        const dispatched = dispatchAutoContinuation('starter-followup', {
+          idSuffix: 'starter-followup',
+          content: continuationPrompt,
+          failureDescription: 'Failed to dispatch starter continuation',
+          successDescription: 'Hidden starter continuation dispatched',
+        });
+
+        if (!dispatched) {
+          pendingStarterContinuationRef.current = normalizedRequest;
+          starterContinuationTriggeredRef.current = false;
+
+          return false;
+        }
+
+        return true;
+      },
+      [dispatchAutoContinuation],
+    );
 
     useEffect(() => {
       if (!boundedChatData || boundedChatData.length === 0) {
@@ -342,7 +698,6 @@ export const ChatImpl = memo(
       }
 
       lastDataEventAtRef.current = Date.now();
-      stallReportedRef.current = false;
 
       const lastUsageEvent = [...boundedChatData]
         .reverse()
@@ -411,6 +766,8 @@ export const ChatImpl = memo(
 
       if (!streaming) {
         stallReportedRef.current = false;
+        stallRecoveryTriggeredRef.current = false;
+        lastTelemetryEmitAtRef.current = 0;
       } else {
         interval = window.setInterval(() => {
           const performanceRecord = performance as Performance & {
@@ -431,25 +788,123 @@ export const ChatImpl = memo(
               : 'n/a';
           const stallMs = Date.now() - lastDataEventAtRef.current;
           const stallSeconds = Math.round(stallMs / 1000);
+          const recentStepEvents = workbenchStore.stepRunnerEvents.get();
+          const lastMeaningfulTimestamp = getLastMeaningfulProgressTimestamp(
+            recentStepEvents,
+            requestLifecycleStartedAtRef.current,
+          );
+          const meaningfulStallMs = Date.now() - lastMeaningfulTimestamp;
+          const meaningfulStallSeconds = Math.round(meaningfulStallMs / 1000);
+          const stallPolicy = resolveStallPolicy(runContextRef.current.model);
           const telemetryMessage = `memory ${heapUsedMb}/${heapLimitMb} MB | data ${boundedChatData.length}/${MAX_CHAT_DATA_EVENTS} | messages ${messages.length} | stall ${stallSeconds}s`;
 
-          appendStepRunnerEvent({
-            type: 'telemetry',
-            timestamp: new Date().toISOString(),
-            description: 'runtime telemetry',
-            output: telemetryMessage,
-          });
+          const now = Date.now();
 
-          if (stallMs > 45000 && !stallReportedRef.current) {
+          if (now - lastTelemetryEmitAtRef.current >= TELEMETRY_EMIT_INTERVAL_MS) {
+            appendStepRunnerEvent({
+              type: 'telemetry',
+              timestamp: new Date().toISOString(),
+              description: 'runtime telemetry',
+              output: telemetryMessage,
+            });
+            lastTelemetryEmitAtRef.current = now;
+          }
+
+          if (
+            meaningfulStallMs > 25000 &&
+            pendingStarterContinuationRef.current &&
+            !starterContinuationTriggeredRef.current
+          ) {
+            appendStepRunnerEvent({
+              type: 'error',
+              timestamp: new Date().toISOString(),
+              description: 'Starter bootstrap stalled; forcing continuation',
+              error: `No meaningful progress for ${meaningfulStallSeconds}s`,
+            });
+
+            stop();
+            setFakeLoading(false);
+            dispatchStarterContinuation('stream-stalled');
+
+            return;
+          }
+
+          if (meaningfulStallMs > stallPolicy.warningMs && !stallReportedRef.current) {
             stallReportedRef.current = true;
+
+            const recentEventSummary = recentStepEvents
+              .slice(-6)
+              .map((event) => `${event.type}${typeof event.exitCode === 'number' ? `(${event.exitCode})` : ''}`)
+              .join(' -> ');
 
             appendStepRunnerEvent({
               type: 'error',
               timestamp: new Date().toISOString(),
               description: 'Potential stall detected',
-              error: `No stream progress for ${stallSeconds}s`,
-              output: telemetryMessage,
+              error: `No stream progress for ${meaningfulStallSeconds}s`,
+              output: `${telemetryMessage} | recent events: ${recentEventSummary || 'n/a'}`,
             });
+          }
+
+          if (meaningfulStallMs > stallPolicy.recoveryMs && !stallRecoveryTriggeredRef.current) {
+            stallRecoveryTriggeredRef.current = true;
+
+            const activeRunContext = runContextRef.current;
+            const hasRequestContext = latestUserRequestRef.current.trim().length > 0;
+            const shouldAutoContinue = hasRequestContext;
+
+            logger.error('stream stalled and auto-recovery engaged', {
+              stallSeconds: meaningfulStallSeconds,
+              telemetryMessage,
+              hasRequestContext,
+              provider: activeRunContext.providerName,
+              model: activeRunContext.model,
+            });
+
+            appendStepRunnerEvent({
+              type: 'error',
+              timestamp: new Date().toISOString(),
+              description: 'Auto-recovery triggered for stalled stream',
+              error: `No stream progress for ${meaningfulStallSeconds}s`,
+              output: `${telemetryMessage} | autoContinue=${shouldAutoContinue ? 'yes' : 'no'}`,
+            });
+
+            stop();
+            setFakeLoading(false);
+
+            if (shouldAutoContinue) {
+              const recoveryPrompt = buildModelSelectionEnvelope({
+                model: activeRunContext.model,
+                providerName: activeRunContext.providerName,
+                selectionReason: 'Auto-recovery resumed after stalled stream.',
+                content: `The previous run stalled after scaffold/install/start with no final response.
+Continue from the current project state without re-scaffolding.
+Original request:
+${latestUserRequestRef.current}
+
+Requirements:
+1) Continue implementation from current files.
+2) If dependencies are already installed, do not repeat installs unless required.
+3) Start/verify preview and confirm it is running.
+4) Start by emitting executable <boltAction> steps instead of planning prose.
+5) Return a clear final response with what was completed and any remaining gaps.`,
+              });
+
+              appendStepRunnerEvent({
+                type: 'telemetry',
+                timestamp: new Date().toISOString(),
+                description: 'Dispatching hidden continuation prompt',
+                output: `provider=${activeRunContext.providerName} model=${activeRunContext.model}`,
+              });
+
+              requestLifecycleStartedAtRef.current = Date.now();
+              dispatchAutoContinuation('stall-recovery', {
+                idSuffix: 'stall-recovery',
+                content: recoveryPrompt,
+                failureDescription: 'Failed to dispatch stalled-stream continuation',
+                successDescription: 'Hidden stalled-stream continuation dispatched',
+              });
+            }
           }
         }, TELEMETRY_SAMPLE_MS);
       }
@@ -459,7 +914,24 @@ export const ChatImpl = memo(
           window.clearInterval(interval);
         }
       };
-    }, [boundedChatData.length, fakeLoading, isLoading, messages.length]);
+    }, [
+      append,
+      boundedChatData.length,
+      dispatchAutoContinuation,
+      dispatchStarterContinuation,
+      fakeLoading,
+      isLoading,
+      messages.length,
+      stop,
+    ]);
+
+    useEffect(() => {
+      if (isLoading || fakeLoading) {
+        return;
+      }
+
+      dispatchStarterContinuation('stream-finished');
+    }, [dispatchStarterContinuation, fakeLoading, isLoading]);
 
     useEffect(() => {
       if (selectionBootstrapRef.current || activeProviders.length === 0) {
@@ -546,7 +1018,7 @@ export const ChatImpl = memo(
     const { enhancingPrompt, promptEnhanced, enhancePrompt, resetEnhancer } = usePromptEnhancer();
     const { parsedMessages, parseMessages } = useMessageParser();
 
-    const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
+    const TEXTAREA_MAX_HEIGHT = chatStarted ? 180 : 136;
 
     useEffect(() => {
       chatStore.setKey('started', initialMessages.length > 0);
@@ -585,12 +1057,13 @@ export const ChatImpl = memo(
 
     const buildChatRequestDiagnostics = useCallback(
       (context: 'chat' | 'template' | 'llmcall', error: unknown) => {
+        const activeRunContext = runContextRef.current;
         const lastMessage = messages[messages.length - 1];
 
         return {
           context,
-          provider: provider.name,
-          model,
+          provider: activeRunContext.providerName,
+          model: activeRunContext.model,
           route:
             typeof window !== 'undefined'
               ? `${window.location.pathname}${window.location.search}${window.location.hash}`
@@ -609,7 +1082,7 @@ export const ChatImpl = memo(
           errorStack: error instanceof Error ? error.stack : undefined,
         };
       },
-      [fakeLoading, input.length, isLoading, messages, model, provider.name],
+      [fakeLoading, input.length, isLoading, messages],
     );
 
     const handleError = useCallback(
@@ -626,7 +1099,7 @@ export const ChatImpl = memo(
           message: 'An unexpected error occurred',
           isRetryable: true,
           statusCode: 500,
-          provider: provider.name,
+          provider: diagnostics.provider,
           type: 'unknown' as const,
           retryDelay: 0,
         };
@@ -676,7 +1149,7 @@ export const ChatImpl = memo(
           context,
           retryable: errorInfo.isRetryable,
           errorType,
-          provider: provider.name,
+          provider: diagnostics.provider,
           diagnostics,
         });
 
@@ -700,22 +1173,104 @@ export const ChatImpl = memo(
           ),
         });
 
+        const normalizedErrorMessage = errorInfo.message.toLowerCase();
+        const timeoutLikeError =
+          normalizedErrorMessage.includes('bolt_stream_timeout') ||
+          normalizedErrorMessage.includes('stream timed out') ||
+          normalizedErrorMessage.includes('generation stream timed out');
+        let queuedAutoRecovery = false;
+
+        if (
+          context === 'chat' &&
+          timeoutLikeError &&
+          latestUserRequestRef.current.trim().length > 0 &&
+          !stallRecoveryTriggeredRef.current
+        ) {
+          queuedAutoRecovery = true;
+          stallRecoveryTriggeredRef.current = true;
+
+          const activeRunContext = runContextRef.current;
+          const recoveryPrompt = buildModelSelectionEnvelope({
+            model: activeRunContext.model,
+            providerName: activeRunContext.providerName,
+            selectionReason: 'The previous run timed out before completing. Continuing from current workspace state.',
+            content: `The previous run timed out before completing.
+Continue from the current project state without restarting from scratch.
+
+Original request:
+${latestUserRequestRef.current}
+
+Requirements:
+1) Do not re-scaffold if project files already exist.
+2) Emit actionable <boltAction> steps (file/shell/start) that continue implementation.
+3) Verify preview/runtime state after each major step.
+4) Do not return plan-only prose; start with executable actions.
+5) End with a concise completion summary and any remaining gaps.`,
+          });
+
+          appendStepRunnerEvent({
+            type: 'telemetry',
+            timestamp: new Date().toISOString(),
+            description: 'Dispatching hidden continuation after timeout',
+            output: `provider=${activeRunContext.providerName} model=${activeRunContext.model}`,
+          });
+
+          requestLifecycleStartedAtRef.current = Date.now();
+          queuedAutoRecovery = dispatchAutoContinuation('timeout-recovery', {
+            idSuffix: 'timeout-recovery',
+            content: recoveryPrompt,
+            failureDescription: 'Failed to dispatch timeout recovery continuation',
+            successDescription: 'Hidden timeout continuation dispatched',
+          });
+        }
+
         // Create API error alert
-        setLlmErrorAlert({
-          type: 'error',
-          title,
-          description: errorInfo.message,
-          provider: provider.name,
-          errorType,
-        });
+        if (queuedAutoRecovery) {
+          setLlmErrorAlert(undefined);
+          toast.info('The run timed out. Auto-recovery is continuing from the current workspace state.');
+        } else {
+          setLlmErrorAlert({
+            type: 'error',
+            title,
+            description: errorInfo.message,
+            provider: diagnostics.provider,
+            errorType,
+          });
+        }
+
         setData([]);
       },
-      [buildChatRequestDiagnostics, provider.name, stop],
+      [buildChatRequestDiagnostics, dispatchAutoContinuation, stop],
     );
 
     const clearApiErrorAlert = useCallback(() => {
       setLlmErrorAlert(undefined);
     }, []);
+
+    const replaceMessagesAndReload = useCallback(
+      (
+        nextMessages: Message[],
+        options?: {
+          experimental_attachments?: Attachment[];
+        },
+      ) => {
+        flushSync(() => {
+          setMessages(nextMessages);
+        });
+
+        appendStepRunnerEvent({
+          type: 'telemetry',
+          timestamp: new Date().toISOString(),
+          description: 'Reload scheduled',
+          output: `messages=${nextMessages.length} attachments=${options?.experimental_attachments?.length || 0}`,
+        });
+
+        Promise.resolve(reload(options)).catch((reloadError) => {
+          handleError(reloadError, 'chat');
+        });
+      },
+      [handleError, reload, setMessages],
+    );
 
     useEffect(() => {
       const textarea = textareaRef.current;
@@ -835,17 +1390,50 @@ export const ChatImpl = memo(
       return attachments.length > 0 ? attachments : undefined;
     };
 
+    const hasProviderCredential = useCallback(
+      async (providerName: string): Promise<boolean> => {
+        if (LOCAL_PROVIDER_SET.has(providerName)) {
+          return true;
+        }
+
+        const fromUi = normalizeCredential(apiKeys[providerName]);
+
+        if (fromUi) {
+          return true;
+        }
+
+        if (providerEnvKeyStatusRef.current[providerName] !== undefined) {
+          return providerEnvKeyStatusRef.current[providerName];
+        }
+
+        try {
+          const response = await fetch(`/api/check-env-key?provider=${encodeURIComponent(providerName)}`);
+          const payload = (await response.json()) as { isSet?: boolean };
+          const isSet = Boolean(payload?.isSet);
+
+          providerEnvKeyStatusRef.current[providerName] = isSet;
+
+          return isSet;
+        } catch {
+          providerEnvKeyStatusRef.current[providerName] = false;
+          return false;
+        }
+      },
+      [apiKeys],
+    );
+
     const resolveModelSelection = useCallback(
       async (prompt: string, currentModel: string, currentProvider: ProviderInfo) => {
         try {
           const response = await fetch('/api/models');
           const data = (await response.json()) as { modelList: ModelInfo[] };
+          const availableModels = data.modelList || [];
           const decision = selectModelForPrompt({
             prompt,
             currentModel,
             currentProvider,
             availableProviders: activeProviders,
-            availableModels: data.modelList || [],
+            availableModels,
           });
 
           logStore.logProvider('Model orchestrator decision', {
@@ -857,24 +1445,98 @@ export const ChatImpl = memo(
             overridden: decision.overridden,
           });
 
-          if (decision.overridden) {
-            setModel(decision.model);
-            setProvider(decision.provider);
-            Cookies.set('selectedModel', decision.model, { expires: CHAT_SELECTION_COOKIE_EXPIRY_DAYS });
-            Cookies.set('selectedProvider', decision.provider.name, { expires: CHAT_SELECTION_COOKIE_EXPIRY_DAYS });
-            rememberProviderModelSelection(decision.provider.name, decision.model);
+          const pickProviderModel = (providerName: string, preferredModel?: string): string | undefined => {
+            const providerModels = availableModels.filter((candidate) => candidate.provider === providerName);
 
-            if (typeof window !== 'undefined') {
-              recordProviderHistory(decision.provider.name);
+            if (providerModels.length === 0) {
+              return undefined;
             }
 
-            toast.info(`Model Orchestrator: ${decision.provider.name} / ${decision.model}`);
+            const rememberedModel = getRememberedProviderModel(providerName);
+
+            const chosen = resolvePreferredModelName({
+              providerName,
+              models: providerModels,
+              rememberedModelName: rememberedModel,
+              savedModelName: preferredModel,
+            });
+
+            return chosen || providerModels[0]?.name;
+          };
+
+          let resolvedProvider = decision.provider;
+          let resolvedModel = decision.model;
+          let resolvedReason = decision.reason;
+          let providerConfigured = await hasProviderCredential(resolvedProvider.name);
+
+          if (!providerConfigured) {
+            const candidateProviders = Array.from(
+              new Set([
+                currentProvider.name,
+                resolvedProvider.name,
+                'OpenAI',
+                'Anthropic',
+                'OpenRouter',
+                ...activeProviders.map((candidate) => candidate.name),
+              ]),
+            );
+
+            for (const candidateProviderName of candidateProviders) {
+              const candidateModel = pickProviderModel(candidateProviderName, currentModel);
+
+              if (!candidateModel) {
+                continue;
+              }
+
+              const hasUiCandidateCredential = Boolean(normalizeCredential(apiKeys[candidateProviderName]));
+              const allowCrossProviderAutoSwitch =
+                candidateProviderName === currentProvider.name ||
+                candidateProviderName === resolvedProvider.name ||
+                LOCAL_PROVIDER_SET.has(candidateProviderName) ||
+                hasUiCandidateCredential;
+
+              if (!allowCrossProviderAutoSwitch) {
+                continue;
+              }
+
+              const candidateConfigured = await hasProviderCredential(candidateProviderName);
+
+              if (!candidateConfigured) {
+                continue;
+              }
+
+              resolvedProvider =
+                activeProviders.find((candidate) => candidate.name === candidateProviderName) ||
+                resolveProviderInfo(candidateProviderName);
+              resolvedModel = candidateModel;
+              resolvedReason = `Switched to configured provider ${candidateProviderName}/${candidateModel} because ${decision.provider.name} is not configured for this instance.`;
+              providerConfigured = true;
+              break;
+            }
+          }
+
+          const selectionChanged =
+            resolvedProvider.name !== currentProvider.name || resolvedModel !== currentModel || decision.overridden;
+
+          if (selectionChanged) {
+            setModel(resolvedModel);
+            setProvider(resolvedProvider);
+            Cookies.set('selectedModel', resolvedModel, { expires: CHAT_SELECTION_COOKIE_EXPIRY_DAYS });
+            Cookies.set('selectedProvider', resolvedProvider.name, { expires: CHAT_SELECTION_COOKIE_EXPIRY_DAYS });
+            rememberProviderModelSelection(resolvedProvider.name, resolvedModel);
+
+            if (typeof window !== 'undefined') {
+              recordProviderHistory(resolvedProvider.name);
+            }
+
+            toast.info(`Model Orchestrator: ${resolvedProvider.name} / ${resolvedModel}`);
           }
 
           return {
-            provider: decision.provider,
-            model: decision.model,
-            reason: decision.reason,
+            provider: resolvedProvider,
+            model: resolvedModel,
+            reason: resolvedReason,
+            isProviderConfigured: providerConfigured,
           };
         } catch (error) {
           logger.warn('Model orchestrator failed, using selected model', error);
@@ -882,10 +1544,11 @@ export const ChatImpl = memo(
             provider: currentProvider,
             model: currentModel,
             reason: 'Model orchestrator failed; kept manual model selection.',
+            isProviderConfigured: true,
           };
         }
       },
-      [activeProviders],
+      [activeProviders, hasProviderCredential],
     );
 
     const buildSessionPayload = useCallback(() => {
@@ -1130,6 +1793,12 @@ export const ChatImpl = memo(
         selectedElement,
         sketchElements,
       });
+      requestLifecycleStartedAtRef.current = Date.now();
+      latestUserRequestRef.current = finalMessageContent;
+      stallRecoveryTriggeredRef.current = false;
+      starterContinuationTriggeredRef.current = false;
+      pendingStarterContinuationRef.current = null;
+      autoContinuationCountRef.current = 0;
 
       if (agentMode === 'act') {
         const executed = await runAgentActWorkflow();
@@ -1178,6 +1847,26 @@ export const ChatImpl = memo(
       const effectiveModel = selection.model;
       const effectiveProvider = selection.provider;
       const selectionReason = selection.reason;
+      runContextRef.current = {
+        model: effectiveModel,
+        providerName: effectiveProvider.name,
+      };
+
+      if (!selection.isProviderConfigured) {
+        appendStepRunnerEvent({
+          type: 'error',
+          timestamp: new Date().toISOString(),
+          description: 'Provider preflight failed',
+          error: `No usable API key found for ${effectiveProvider.name}.`,
+          output: 'Configure an API key (UI or environment) or switch to a configured provider.',
+        });
+        toast.error(
+          `The selected provider (${effectiveProvider.name}) is not configured. Add a valid key or choose another provider.`,
+        );
+
+        return;
+      }
+
       const buildUserMessageText = (content: string) =>
         buildModelSelectionEnvelope({
           model: effectiveModel,
@@ -1269,7 +1958,7 @@ export const ChatImpl = memo(
           });
 
           if (template !== 'blank') {
-            const temResp = await getTemplates(template, title).catch((e) => {
+            const temResp = await getTemplates(template, title, finalMessageContent).catch((e) => {
               if (e.message.includes('rate limit')) {
                 toast.warning('Rate limit exceeded. Skipping starter template\n Continuing with blank template');
               } else {
@@ -1280,18 +1969,21 @@ export const ChatImpl = memo(
             });
 
             if (temResp) {
-              const { assistantMessage, userMessage } = temResp;
+              const { assistantMessage, userMessage, usingLocalFallback } = temResp;
               const starterActionCount = (assistantMessage.match(/<boltAction\b/g) || []).length;
               logger.info('Starter template import prepared', {
                 template,
                 starterActionCount,
-                usingLocalFallback: /fallback starter/i.test(userMessage),
+                usingLocalFallback,
               });
+
+              pendingStarterContinuationRef.current = finalMessageContent;
+              starterContinuationTriggeredRef.current = false;
 
               const userMessageText = buildUserMessageText(finalMessageContent);
               const attachments = await buildChatAttachments();
 
-              setMessages([
+              const nextMessages: Message[] = [
                 {
                   id: `1-${new Date().getTime()}`,
                   role: 'user',
@@ -1310,15 +2002,17 @@ export const ChatImpl = memo(
                   content: buildUserMessageText(userMessage),
                   annotations: ['hidden'],
                 },
-              ]);
+              ];
 
               const reloadOptions = attachments ? { experimental_attachments: attachments } : undefined;
 
               logger.info('Starter template chat reload triggered', {
                 template,
                 hasAttachments: Boolean(attachments?.length),
+                messageCount: nextMessages.length,
+                userRequestPreview: finalMessageContent.slice(0, 180),
               });
-              reload(reloadOptions);
+              replaceMessagesAndReload(nextMessages, reloadOptions);
               setInput('');
               Cookies.remove(PROMPT_COOKIE_KEY);
 
@@ -1340,7 +2034,7 @@ export const ChatImpl = memo(
         const userMessageText = buildUserMessageText(finalMessageContent);
         const attachments = await buildChatAttachments();
 
-        setMessages([
+        const nextMessages: Message[] = [
           {
             id: `${new Date().getTime()}`,
             role: 'user',
@@ -1348,9 +2042,15 @@ export const ChatImpl = memo(
             parts: createMessageParts(userMessageText, imageDataList),
             experimental_attachments: attachments,
           },
-        ]);
+        ];
+        const reloadOptions = attachments ? { experimental_attachments: attachments } : undefined;
 
-        reload(attachments ? { experimental_attachments: attachments } : undefined);
+        logger.info('Initial request reload triggered', {
+          messageCount: nextMessages.length,
+          hasAttachments: Boolean(attachments?.length),
+          userRequestPreview: finalMessageContent.slice(0, 180),
+        });
+        replaceMessagesAndReload(nextMessages, reloadOptions);
         setFakeLoading(false);
         setInput('');
         Cookies.remove(PROMPT_COOKIE_KEY);

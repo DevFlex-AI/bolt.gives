@@ -27,14 +27,18 @@ import { AgentRecoveryController } from '~/lib/.server/llm/agent-recovery';
 import { StreamRecoveryManager } from '~/lib/.server/llm/stream-recovery';
 import { recordAgentRunMetrics } from '~/lib/.server/llm/run-metrics';
 import { deriveProjectMemoryKey, getProjectMemory, upsertProjectMemory } from '~/lib/.server/llm/project-memory';
-import { shouldForceRunContinuation } from '~/lib/.server/llm/run-continuation';
+import { analyzeRunContinuation } from '~/lib/.server/llm/run-continuation';
 import { SubAgentManager, type SubAgentConfig, type SubAgentState } from '~/lib/.server/llm/sub-agent';
 import { createPlannerExecutor } from '~/lib/.server/llm/sub-agent/planner-executor';
+import { resolveRuntimeEnv } from '~/lib/.server/runtime-env';
 import { addUsageTotals } from '~/lib/runtime/usage';
 import { enforceCommentaryContract } from '~/lib/runtime/commentary-contract';
 import { extractCheckpointEvents, extractExecutionFailure } from '~/lib/runtime/checkpoint-events';
 import { COMMENTARY_HEARTBEAT_INTERVAL_MS, buildCommentaryHeartbeat } from '~/lib/runtime/commentary-heartbeat';
 import { getCommentaryPoolMessage } from '~/lib/runtime/commentary-pool.generated';
+import { LLMManager } from '~/lib/modules/llm/manager';
+import { hydrateApiKeysFromRuntimeEnv, mergeAndSanitizeApiKeys } from '~/lib/.server/llm/api-key-utils';
+import { normalizeCredential } from '~/lib/runtime/credentials';
 import {
   ensureLatestUserMessageSelectionEnvelope,
   resolvePreferredModelProvider,
@@ -46,6 +50,51 @@ export async function action(args: ActionFunctionArgs) {
 }
 
 const logger = createScopedLogger('api.chat');
+const MAX_RUN_CONTINUATION_ATTEMPTS = 5;
+const LONG_THINK_MODEL_RE =
+  /\b(gpt-5|gpt-5\.2|gpt-5-codex|codex|o1|o3|claude-3\.7|claude-3\.5-sonnet-latest|claude-3-5-sonnet-latest)\b/i;
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value == null) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function buildForcedRunRecoveryPrompt(params: { provider: string; model: string; originalRequest: string }): string {
+  const { provider, model, originalRequest } = params;
+
+  return `[Model: ${model}]
+
+[Provider: ${provider}]
+
+Forced recovery mode: previous attempts did not produce a runnable implementation.
+Continue from the current project state and execute the original request now.
+
+Original request:
+${originalRequest}
+
+Hard requirements (must follow exactly):
+1) Emit exactly one <boltArtifact> with executable <boltAction> steps.
+2) Do NOT run inspection-only commands (ls, pwd, cat, find, tree, env, echo).
+3) Do NOT re-scaffold if package.json already exists.
+4) First meaningful actions must be <boltAction type="file"> updates that implement the requested features.
+5) If dependencies are missing, run a single install command.
+6) Include a <boltAction type="start"> command to run the dev server.
+7) If preview still shows fallback starter text, replace src/App.tsx (or equivalent root UI entry) immediately.
+8) Keep prose short; focus on executable steps and completion.`;
+}
 
 function extractLatestUserGoal(messages: Messages): string {
   const lastUser = [...messages].reverse().find((message) => message.role === 'user');
@@ -104,18 +153,26 @@ function parseCookies(cookieHeader: string): Record<string, string> {
   return cookies;
 }
 
+function parseJsonObject<T extends Record<string, any>>(raw: string | undefined, fallback: T): T {
+  if (!raw) {
+    return fallback;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return fallback;
+    }
+
+    return parsed as T;
+  } catch {
+    return fallback;
+  }
+}
+
 async function chatAction({ context, request }: ActionFunctionArgs) {
-  const {
-    messages,
-    files,
-    promptId,
-    contextOptimization,
-    supabase,
-    chatMode,
-    designScheme,
-    maxLLMSteps,
-    projectMemory,
-  } = await request.json<{
+  const requestPayload = await request.json<{
     messages: Messages;
     files: any;
     promptId?: string;
@@ -139,14 +196,53 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
       runCount: number;
       updatedAt: string;
     } | null;
+    apiKeys?: Record<string, string>;
+    providerSettings?: Record<string, IProviderSetting>;
+    selectedModel?: string;
+    selectedProvider?: string;
   }>();
+  const {
+    messages,
+    files,
+    promptId,
+    contextOptimization,
+    supabase,
+    chatMode,
+    designScheme,
+    maxLLMSteps,
+    projectMemory,
+    apiKeys: bodyApiKeys = {},
+    providerSettings: bodyProviderSettings = {},
+    selectedModel: selectedModelBody,
+    selectedProvider: selectedProviderBody,
+  } = requestPayload;
 
   const cookieHeader = request.headers.get('Cookie');
   const parsedCookies = parseCookies(cookieHeader || '');
-  const apiKeys = JSON.parse(parsedCookies.apiKeys || '{}');
-  const providerSettings: Record<string, IProviderSetting> = JSON.parse(parsedCookies.providers || '{}');
+  const cookieApiKeys = parseJsonObject<Record<string, string>>(parsedCookies.apiKeys, {});
+  const cookieProviderSettings = parseJsonObject<Record<string, IProviderSetting>>(parsedCookies.providers, {});
   const selectedModelCookie = parsedCookies.selectedModel;
   const selectedProviderCookie = parsedCookies.selectedProvider;
+  const selectedModel = selectedModelBody || selectedModelCookie;
+  const selectedProvider = selectedProviderBody || selectedProviderCookie;
+  const runtimeEnv = resolveRuntimeEnv(context.cloudflare?.env as unknown as Record<string, unknown> | undefined);
+  const llmManager = LLMManager.getInstance(runtimeEnv as any);
+  const providerTokenKeyByName = Object.fromEntries(
+    llmManager.getAllProviders().map((provider) => [provider.name, provider.config.apiTokenKey]),
+  );
+  const mergedApiKeys = mergeAndSanitizeApiKeys({
+    cookieApiKeys,
+    bodyApiKeys,
+  });
+  const apiKeys = hydrateApiKeysFromRuntimeEnv({
+    apiKeys: mergedApiKeys,
+    runtimeEnv,
+    providerTokenKeyByName,
+  });
+  const providerSettings: Record<string, IProviderSetting> = {
+    ...cookieProviderSettings,
+    ...bodyProviderSettings,
+  };
 
   const stream = new SwitchableStream();
 
@@ -163,8 +259,21 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     route: requestUrl.pathname,
     messageCount: messages.length,
     latestRole: messages[messages.length - 1]?.role,
-    selectedModelCookie,
-    selectedProviderCookie,
+    selectedModel,
+    selectedProvider,
+    hasCookieApiKeys: Object.keys(cookieApiKeys).length > 0,
+    hasBodyApiKeys: Object.keys(bodyApiKeys).length > 0,
+    hasMergedApiKeys: Object.keys(mergedApiKeys).length > 0,
+    hasResolvedApiKeys: Object.keys(apiKeys).length > 0,
+    mergedApiKeyProviders: Object.keys(mergedApiKeys),
+    resolvedApiKeyProviders: Object.keys(apiKeys),
+    selectedProviderHasMergedKey: Boolean(
+      selectedProvider ? normalizeCredential(mergedApiKeys[selectedProvider]) : undefined,
+    ),
+    selectedProviderHasResolvedKey: Boolean(
+      selectedProvider ? normalizeCredential(apiKeys[selectedProvider]) : undefined,
+    ),
+    hasOpenAIEnvKey: Boolean(normalizeCredential(runtimeEnv.OPENAI_API_KEY)),
     chatMode,
     maxLLMSteps,
   };
@@ -172,8 +281,8 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     provider?: string;
     model?: string;
   } = {
-    provider: selectedProviderCookie,
-    model: selectedModelCookie,
+    provider: selectedProvider,
+    model: selectedModel,
   };
   const manualInterventionDetected = detectManualIntervention(messages);
   const latestUserGoal = extractLatestUserGoal(messages);
@@ -181,7 +290,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
   const cachedProjectMemory = getProjectMemory(projectKey);
   const effectiveProjectMemory =
     projectMemory && projectMemory.projectKey === projectKey ? projectMemory : cachedProjectMemory;
-  const envVars = context.cloudflare?.env as unknown as Record<string, string | undefined> | undefined;
+  const envVars = runtimeEnv as Record<string, string | undefined>;
   const subAgentManager = SubAgentManager.getInstance();
   const encoder: TextEncoder = new TextEncoder();
   let progressCounter: number = 1;
@@ -195,7 +304,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
   };
 
   try {
-    logger.info('chat request started', requestDebugContext);
+    logger.info(`chat request started ${JSON.stringify(requestDebugContext)}`);
 
     const mcpService = MCPService.getInstance();
     const totalMessageContent = messages.reduce((acc, message) => acc + message.content, '');
@@ -208,6 +317,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         let firstCommentaryAt: number | null = null;
         let lastCommentaryPhase: AgentCommentaryPhase = 'plan';
         let commentaryHeartbeat: ReturnType<typeof setInterval> | null = null;
+        let streamRecovery: StreamRecoveryManager | null = null;
         let recoveryTriggered = false;
         let recoverySucceeded = false;
         let completionEmitted = false;
@@ -221,6 +331,10 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           }
         };
         stopCommentaryHeartbeatHandle = stopCommentaryHeartbeat;
+
+        const markRunActivity = () => {
+          streamRecovery?.updateActivity();
+        };
 
         const writeCommentary = (
           phase: AgentCommentaryPhase,
@@ -354,8 +468,10 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           } satisfies ProgressAnnotation);
         };
 
+        const longThinkSelectedModel = selectedModel || '';
+        const dynamicStreamTimeoutFallbackMs = LONG_THINK_MODEL_RE.test(longThinkSelectedModel) ? 300000 : 180000;
         const configuredStreamTimeoutMs = Number(
-          envVars?.BOLT_STREAM_TIMEOUT_MS || process?.env?.BOLT_STREAM_TIMEOUT_MS || 120000,
+          envVars?.BOLT_STREAM_TIMEOUT_MS || process?.env?.BOLT_STREAM_TIMEOUT_MS || dynamicStreamTimeoutFallbackMs,
         );
         const configuredStreamMaxRetries = Number(
           envVars?.BOLT_STREAM_RECOVERY_MAX_RETRIES || process?.env?.BOLT_STREAM_RECOVERY_MAX_RETRIES || 2,
@@ -363,13 +479,23 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         const streamTimeoutMs =
           Number.isFinite(configuredStreamTimeoutMs) && configuredStreamTimeoutMs >= 30000
             ? configuredStreamTimeoutMs
-            : 120000;
+            : dynamicStreamTimeoutFallbackMs;
         const streamMaxRetries =
           Number.isFinite(configuredStreamMaxRetries) && configuredStreamMaxRetries >= 0
             ? configuredStreamMaxRetries
             : 2;
 
-        const streamRecovery = new StreamRecoveryManager({
+        let activeStreamAbortController: AbortController | null = null;
+        const createStreamAbortSignal = () => {
+          activeStreamAbortController = new AbortController();
+          return activeStreamAbortController.signal;
+        };
+        const stopRunMonitors = () => {
+          streamRecovery?.stop();
+          stopCommentaryHeartbeat();
+          activeStreamAbortController = null;
+        };
+        streamRecovery = new StreamRecoveryManager({
           timeout: streamTimeoutMs,
           maxRetries: streamMaxRetries,
           onTimeout: () => {
@@ -380,6 +506,12 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             recoveryTriggered = true;
             writeCommentary('recovery', signal.message, 'warning', signal.detail);
             logger.warn('Stream timeout - attempting recovery');
+
+            if (activeStreamAbortController && !activeStreamAbortController.signal.aborted) {
+              activeStreamAbortController.abort(
+                new Error(`BOLT_STREAM_TIMEOUT: no stream activity for ${streamTimeoutMs}ms`),
+              );
+            }
           },
         });
         streamRecovery.startMonitoring();
@@ -389,15 +521,17 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         let summary: string | undefined = undefined;
         let messageSliceId = 0;
         const processedMessages = await mcpService.processToolInvocations(messages, dataStream);
-        const preferredSelection = resolvePreferredModelProvider(
-          processedMessages,
-          selectedModelCookie,
-          selectedProviderCookie,
-        );
+        const preferredSelection = resolvePreferredModelProvider(processedMessages, selectedModel, selectedProvider);
+
+        /*
+         * Use explicit user-provided keys (cookie/body) for selection fallback decisions.
+         * Runtime-env hydration still applies at execution time, but we avoid silently
+         * switching to unrelated env-backed providers during model/provider sanitization.
+         */
         const sanitizedSelection = sanitizeSelectionWithApiKeys({
           selection: preferredSelection,
-          apiKeys,
-          selectedProviderCookie,
+          apiKeys: mergedApiKeys,
+          selectedProviderCookie: selectedProvider,
         });
         resolvedSelectionForLogs = {
           provider: sanitizedSelection.provider,
@@ -407,7 +541,8 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
 
         const collectedToolOutputs: string[] = [];
         let forceFinalizeAttempted = false;
-        let runContinuationAttempted = false;
+        let runContinuationAttempts = 0;
+        let forcedRunRecoveryAttempted = false;
 
         writeCommentary('plan', 'I am reviewing your request and mapping out the first steps.');
         startCommentaryHeartbeat();
@@ -432,7 +567,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
 
           summary = await createSummary({
             messages: [...processedMessages],
-            env: context.cloudflare?.env,
+            env: runtimeEnv as any,
             apiKeys,
             providerSettings,
             promptId,
@@ -473,7 +608,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           console.log(`Messages count: ${processedMessages.length}`);
           filteredFiles = await selectContext({
             messages: [...processedMessages],
-            env: context.cloudflare?.env,
+            env: runtimeEnv as any,
             apiKeys,
             files,
             providerSettings,
@@ -531,85 +666,105 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
             : undefined;
           const plannerModel = plannerSelection?.model;
           const plannerProvider = plannerSelection?.provider;
+          const plannerEnabled = parseBooleanEnv(envVars?.BOLT_PLANNER_SUBAGENT_ENABLED, true);
+          const plannerLongThinkEnabled = parseBooleanEnv(envVars?.BOLT_PLANNER_LONG_THINK_ENABLED, false);
+          const plannerModelForPolicy = plannerModel || selectedModel || '';
+          const plannerIsLongThink = LONG_THINK_MODEL_RE.test(plannerModelForPolicy);
+          const shouldRunPlanner = plannerEnabled && (!plannerIsLongThink || plannerLongThinkEnabled);
 
-          const getPlannerParams = async (_messages: Messages, _config: SubAgentConfig) => ({
-            env: context.cloudflare?.env,
-            options: {
-              maxSteps: 1,
-              tools: {},
-              toolChoice: undefined,
-            } as StreamingOptions,
-            apiKeys,
-            files,
-            providerSettings,
-            promptId,
-            contextOptimization,
-            contextFiles: filteredFiles,
-            summary,
-            messageSliceId,
-            chatMode: 'discuss',
-            designScheme,
-            projectMemory: effectiveProjectMemory || undefined,
-          });
+          if (!shouldRunPlanner) {
+            const skipReason = !plannerEnabled
+              ? 'Planner helper is disabled by runtime config.'
+              : `Planner helper is skipped for long-think model ${plannerModelForPolicy || 'unknown model'} to keep execution responsive.`;
+            writeCommentary(
+              'plan',
+              'I am moving straight into implementation for this run.',
+              'in-progress',
+              `Key changes: ${skipReason}
+Next: I am executing code actions directly and will stream progress checkpoints.`,
+            );
+          }
 
-          const plannerExecutor = createPlannerExecutor(getPlannerParams);
-          subAgentManager.registerExecutor('planner', plannerExecutor);
-
-          try {
-            plannerAgentId = await subAgentManager.spawn(undefined, {
-              type: 'planner',
-              model: plannerModel,
-              provider: plannerProvider,
+          if (shouldRunPlanner) {
+            const getPlannerParams = async (_messages: Messages, _config: SubAgentConfig) => ({
+              env: runtimeEnv as any,
+              options: {
+                maxSteps: 1,
+                tools: {},
+                toolChoice: undefined,
+              } as StreamingOptions,
+              apiKeys,
+              files,
+              providerSettings,
+              promptId,
+              contextOptimization,
+              contextFiles: filteredFiles,
+              summary,
+              messageSliceId,
+              chatMode: 'discuss',
+              designScheme,
+              projectMemory: effectiveProjectMemory || undefined,
             });
 
-            const onProgress = (state: SubAgentState, _output: string) => {
-              if (state === 'planning') {
-                writeCommentary('plan', 'I am breaking your request into practical steps.');
-              } else if (state === 'executing') {
-                writeCommentary('plan', 'I am finalizing the plan and preparing to execute.');
-              }
-            };
+            const plannerExecutor = createPlannerExecutor(getPlannerParams);
+            subAgentManager.registerExecutor('planner', plannerExecutor);
 
-            const plannerResult = await subAgentManager.start(plannerAgentId, processedMessages, onProgress);
+            try {
+              plannerAgentId = await subAgentManager.spawn(undefined, {
+                type: 'planner',
+                model: plannerModel,
+                provider: plannerProvider,
+              });
 
-            if (plannerResult.metadata.tokenUsage) {
-              addUsageTotals(cumulativeUsage, plannerResult.metadata.tokenUsage);
-            }
-
-            if (plannerResult.success && plannerResult.output) {
-              subAgentPlan = plannerResult.output;
-
-              const subAgentEvent: SubAgentEvent = {
-                type: 'sub-agent',
-                agentId: plannerResult.metadata.id,
-                agentType: plannerResult.metadata.type,
-                state: plannerResult.metadata.state,
-                model: plannerResult.metadata.model,
-                provider: plannerResult.metadata.provider,
-                plan: plannerResult.metadata.plan,
-                createdAt: plannerResult.metadata.createdAt,
-                startedAt: plannerResult.metadata.startedAt,
-                completedAt: plannerResult.metadata.completedAt,
-                tokenUsage: plannerResult.metadata.tokenUsage,
+              const onProgress = (state: SubAgentState, _output: string) => {
+                if (state === 'planning') {
+                  writeCommentary('plan', 'I am breaking your request into practical steps.');
+                } else if (state === 'executing') {
+                  writeCommentary('plan', 'I am finalizing the plan and preparing to execute.');
+                }
               };
 
-              dataStream.writeData(subAgentEvent);
+              const plannerResult = await subAgentManager.start(plannerAgentId, processedMessages, onProgress);
 
+              if (plannerResult.metadata.tokenUsage) {
+                addUsageTotals(cumulativeUsage, plannerResult.metadata.tokenUsage);
+              }
+
+              if (plannerResult.success && plannerResult.output) {
+                subAgentPlan = plannerResult.output;
+
+                const subAgentEvent: SubAgentEvent = {
+                  type: 'sub-agent',
+                  agentId: plannerResult.metadata.id,
+                  agentType: plannerResult.metadata.type,
+                  state: plannerResult.metadata.state,
+                  model: plannerResult.metadata.model,
+                  provider: plannerResult.metadata.provider,
+                  plan: plannerResult.metadata.plan,
+                  createdAt: plannerResult.metadata.createdAt,
+                  startedAt: plannerResult.metadata.startedAt,
+                  completedAt: plannerResult.metadata.completedAt,
+                  tokenUsage: plannerResult.metadata.tokenUsage,
+                };
+
+                dataStream.writeData(subAgentEvent);
+
+                writeCommentary(
+                  'plan',
+                  'Planning is complete. I am moving into execution now.',
+                  'complete',
+                  subAgentPlan.slice(0, 260),
+                );
+              }
+            } catch {
               writeCommentary(
-                'plan',
-                'Planning is complete. I am moving into execution now.',
-                'complete',
-                subAgentPlan.slice(0, 260),
+                'recovery',
+                'Planning helper had an issue, so I am continuing directly.',
+                'warning',
+                `Key changes: The planning helper could not complete this step, so I switched to direct execution.
+Next: I am continuing with the main coding flow and will keep you updated.`,
               );
             }
-          } catch {
-            writeCommentary(
-              'recovery',
-              'Planning helper had an issue, so I am continuing directly.',
-              'warning',
-              `Key changes: The planning helper could not complete this step, so I switched to direct execution.
-Next: I am continuing with the main coding flow and will keep you updated.`,
-            );
           }
         }
 
@@ -618,7 +773,15 @@ Next: I am continuing with the main coding flow and will keep you updated.`,
           toolChoice: 'auto',
           tools: mcpService.toolsWithoutExecute,
           maxSteps: maxLLMSteps,
+          onChunk: () => {
+            markRunActivity();
+          },
+          onError: ({ error }) => {
+            logger.error('Streaming error:', error);
+          },
           onStepFinish: ({ toolCalls, toolResults }) => {
+            markRunActivity();
+
             // add tool call annotations for frontend processing
             toolCalls.forEach((toolCall) => {
               mcpService.processToolCall(toolCall, dataStream);
@@ -794,14 +957,18 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
                     writeCommentary('next-step', 'Final response generated and ready for delivery.', 'complete');
                   }
 
+                  stopRunMonitors();
                   emitRunCompletionEvents(finalContent, model, provider);
                 },
               };
 
               const result = await streamText({
                 messages: [...processedMessages],
-                env: context.cloudflare?.env,
-                options: finalizeOptions,
+                env: runtimeEnv as any,
+                options: {
+                  ...finalizeOptions,
+                  abortSignal: createStreamAbortSignal(),
+                },
                 apiKeys,
                 files,
                 providerSettings,
@@ -816,24 +983,44 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
                 subAgentPlan,
               });
 
+              markRunActivity();
               result.mergeIntoDataStream(dataStream);
 
               return;
             }
 
-            const shouldContinueForRunIntent = shouldForceRunContinuation({
+            const runContinuationDecision = analyzeRunContinuation({
               chatMode: chatMode || 'build',
               lastUserContent,
               assistantContent: content,
-              alreadyAttempted: runContinuationAttempted,
+              alreadyAttempted: false,
+              attemptCount: runContinuationAttempts,
             });
+            const continuationLimitReached = runContinuationAttempts >= MAX_RUN_CONTINUATION_ATTEMPTS;
+            const shouldContinueForRunIntent = runContinuationDecision.shouldContinue && !continuationLimitReached;
 
             if (shouldContinueForRunIntent) {
-              runContinuationAttempted = true;
+              runContinuationAttempts += 1;
+
+              const continuationAttemptLabel = `${runContinuationAttempts}/${MAX_RUN_CONTINUATION_ATTEMPTS}`;
               writeCommentary(
                 'recovery',
                 'I detected that setup finished but the app did not start yet. I will continue automatically.',
                 'warning',
+                `Key changes: Continuation triggered (${runContinuationDecision.reason}, attempt ${continuationAttemptLabel}). I detected a starter/bootstrap-only response.
+Next: I will continue from the existing project state, implement the requested app, and run it.`,
+              );
+              logger.info(
+                `run continuation triggered ${JSON.stringify({
+                  runId,
+                  reason: runContinuationDecision.reason,
+                  provider,
+                  model,
+                  attempt: runContinuationAttempts,
+                  maxAttempts: MAX_RUN_CONTINUATION_ATTEMPTS,
+                  assistantChars: content.length,
+                  assistantPreview: content.replace(/\s+/g, ' ').slice(0, 220),
+                })}`,
               );
 
               processedMessages.push({ id: generateId(), role: 'assistant', content });
@@ -844,18 +1031,30 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
 
 [Provider: ${provider}]
 
-You scaffolded a project but did not complete runtime startup.
+You scaffolded a project but did not complete the requested implementation.
 Continue now and do ALL of the following:
-1) install dependencies if not already installed.
-2) include a <boltAction type="start"> command that launches the dev server.
-3) keep the final response concise and execution-focused.
+1) continue from the current project files (do NOT re-run create-vite/create-react-app if package.json already exists).
+2) implement the requested product requirements from the original user request:
+   ${lastUserContent}
+3) install dependencies only if missing.
+4) include a <boltAction type="start"> command that launches the dev server.
+5) if a command fails, self-heal and retry with a corrected command.
+6) your response must start with executable <boltAction> steps (no plan-only prose).
+7) if preview still shows the starter, replace src/App.tsx (or equivalent entry UI file) with the requested implementation.
+8) keep the final response concise and execution-focused.
+9) do NOT run inspection-only commands (ls, pwd, cat, find, tree, env) as standalone steps.
+10) your first meaningful action must implement feature code files for the original request.
+${runContinuationAttempts >= 2 ? '11) this is the final continuation attempt: skip diagnostics and apply implementation changes immediately.' : ''}
 `,
               });
 
               const result = await streamText({
                 messages: [...processedMessages],
-                env: context.cloudflare?.env,
-                options,
+                env: runtimeEnv as any,
+                options: {
+                  ...options,
+                  abortSignal: createStreamAbortSignal(),
+                },
                 apiKeys,
                 files,
                 providerSettings,
@@ -870,22 +1069,86 @@ Continue now and do ALL of the following:
                 subAgentPlan,
               });
 
+              markRunActivity();
               result.mergeIntoDataStream(dataStream);
-
-              (async () => {
-                for await (const part of result.fullStream) {
-                  if (part.type === 'error') {
-                    const error: any = part.error;
-                    logger.error(`${error}`);
-                    stopCommentaryHeartbeat();
-
-                    return;
-                  }
-                }
-              })();
 
               return;
             }
+
+            if (
+              runContinuationDecision.shouldContinue &&
+              continuationLimitReached &&
+              !forcedRunRecoveryAttempted &&
+              (chatMode || 'build') === 'build'
+            ) {
+              forcedRunRecoveryAttempted = true;
+              writeCommentary(
+                'recovery',
+                'Automatic recovery is escalating because previous attempts did not produce implementation steps.',
+                'warning',
+                `Key changes: Escalated continuation recovery after ${runContinuationAttempts} attempts (${runContinuationDecision.reason}).
+Next: I will force a file-first implementation response and relaunch preview from the existing project state.`,
+              );
+              logger.warn(
+                `run continuation escalated to forced recovery ${JSON.stringify({
+                  runId,
+                  reason: runContinuationDecision.reason,
+                  provider,
+                  model,
+                  attempts: runContinuationAttempts,
+                  maxAttempts: MAX_RUN_CONTINUATION_ATTEMPTS,
+                  assistantChars: content.length,
+                  assistantPreview: content.replace(/\s+/g, ' ').slice(0, 220),
+                })}`,
+              );
+
+              processedMessages.push({ id: generateId(), role: 'assistant', content });
+              processedMessages.push({
+                id: generateId(),
+                role: 'user',
+                content: buildForcedRunRecoveryPrompt({
+                  provider,
+                  model,
+                  originalRequest: lastUserContent,
+                }),
+              });
+
+              const result = await streamText({
+                messages: [...processedMessages],
+                env: runtimeEnv as any,
+                options: {
+                  ...options,
+                  abortSignal: createStreamAbortSignal(),
+                },
+                apiKeys,
+                files,
+                providerSettings,
+                promptId,
+                contextOptimization,
+                contextFiles: filteredFiles,
+                chatMode,
+                designScheme,
+                summary,
+                messageSliceId,
+                projectMemory: effectiveProjectMemory || undefined,
+                subAgentPlan,
+              });
+
+              markRunActivity();
+              result.mergeIntoDataStream(dataStream);
+
+              return;
+            }
+
+            logger.debug(
+              `run continuation not required ${JSON.stringify({
+                runId,
+                reason: runContinuationDecision.reason,
+                provider,
+                model,
+                continuationAttempts: runContinuationAttempts,
+              })}`,
+            );
 
             if (finishReason !== 'length') {
               if (pendingRecoveryReason) {
@@ -914,6 +1177,7 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
                 writeCommentary('next-step', 'Final response generated and ready for delivery.', 'complete');
               }
 
+              stopRunMonitors();
               emitRunCompletionEvents(content, model, provider);
               await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -937,8 +1201,11 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
 
             const result = await streamText({
               messages: [...processedMessages],
-              env: context.cloudflare?.env,
-              options,
+              env: runtimeEnv as any,
+              options: {
+                ...options,
+                abortSignal: createStreamAbortSignal(),
+              },
               apiKeys,
               files,
               providerSettings,
@@ -953,19 +1220,8 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
               subAgentPlan,
             });
 
+            markRunActivity();
             result.mergeIntoDataStream(dataStream);
-
-            (async () => {
-              for await (const part of result.fullStream) {
-                if (part.type === 'error') {
-                  const error: any = part.error;
-                  logger.error(`${error}`);
-                  stopCommentaryHeartbeat();
-
-                  return;
-                }
-              }
-            })();
 
             return;
           },
@@ -982,8 +1238,11 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
 
         const result = await streamText({
           messages: [...processedMessages],
-          env: context.cloudflare?.env,
-          options,
+          env: runtimeEnv as any,
+          options: {
+            ...options,
+            abortSignal: createStreamAbortSignal(),
+          },
           apiKeys,
           files,
           providerSettings,
@@ -998,50 +1257,33 @@ Next: I am returning clear recovery instructions to help you resolve it quickly.
           subAgentPlan,
         });
 
-        (async () => {
-          for await (const part of result.fullStream) {
-            streamRecovery.updateActivity();
-
-            if (part.type === 'error') {
-              const error: any = part.error;
-              logger.error('Streaming error:', error);
-              streamRecovery.stop();
-              stopCommentaryHeartbeat();
-
-              // Enhanced error handling for common streaming issues
-              if (error.message?.includes('Invalid JSON response')) {
-                logger.error('Invalid JSON response detected - likely malformed API response');
-              } else if (error.message?.includes('token')) {
-                logger.error('Token-related error detected - possible token limit exceeded');
-              }
-
-              return;
-            }
-          }
-          streamRecovery.stop();
-          stopCommentaryHeartbeat();
-        })();
+        markRunActivity();
         result.mergeIntoDataStream(dataStream);
       },
       onError: (error: any) => {
         stopHeartbeatIfRunning();
 
         const elapsedMs = Date.now() - requestStartedAt;
-        logger.error('chat stream onError', {
-          ...requestDebugContext,
-          elapsedMs,
-          resolvedProvider: resolvedSelectionForLogs.provider,
-          resolvedModel: resolvedSelectionForLogs.model,
-          errorName: error?.name,
-          errorMessage: error?.message || String(error),
-          errorStack: error?.stack,
-        });
+        logger.error(
+          `chat stream onError ${JSON.stringify({
+            ...requestDebugContext,
+            elapsedMs,
+            resolvedProvider: resolvedSelectionForLogs.provider,
+            resolvedModel: resolvedSelectionForLogs.model,
+            errorName: error?.name,
+            errorMessage: error?.message || String(error),
+          })}`,
+        );
 
         // Provide more specific error messages for common issues
         const errorMessage = error.message || 'Unknown error';
 
         if (errorMessage.includes('model') && errorMessage.includes('not found')) {
           return 'Custom error: Invalid model selected. Please check that the model name is correct and available.';
+        }
+
+        if (errorMessage.includes('BOLT_STREAM_TIMEOUT')) {
+          return 'Custom error: Generation stream timed out while waiting for model output. The run was stopped so recovery can continue safely.';
         }
 
         if (errorMessage.includes('Invalid JSON response')) {
