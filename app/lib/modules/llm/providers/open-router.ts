@@ -9,8 +9,8 @@ interface OpenRouterModel {
   id: string;
   context_length: number;
   pricing: {
-    prompt: number;
-    completion: number;
+    prompt: number | string;
+    completion: number | string;
   };
 }
 
@@ -48,24 +48,49 @@ export default class OpenRouterProvider extends BaseProvider {
   ];
 
   async getDynamicModels(
-    _apiKeys?: Record<string, string>,
-    _settings?: IProviderSetting,
-    _serverEnv: Record<string, string> = {},
+    apiKeys?: Record<string, string>,
+    settings?: IProviderSetting,
+    serverEnv: Record<string, string> = {},
   ): Promise<ModelInfo[]> {
     try {
+      const { apiKey } = this.getProviderBaseUrlAndKey({
+        apiKeys,
+        providerSettings: settings,
+        serverEnv,
+        defaultBaseUrlKey: '',
+        defaultApiTokenKey: 'OPEN_ROUTER_API_KEY',
+      });
+
+      // OpenRouter dynamic listing is key-scoped; skip network calls when key is absent.
+      if (!apiKey) {
+        return [];
+      }
+
       const response = await fetch('https://openrouter.ai/api/v1/models', {
         headers: {
           'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://bolt.gives',
+          'X-Title': 'bolt.gives',
         },
+        signal: this.createTimeoutSignal(10000),
       });
 
-      const data = (await response.json()) as OpenRouterModelsResponse;
+      if (!response.ok) {
+        throw new Error(`OpenRouter model list request failed (${response.status})`);
+      }
 
-      return data.data
+      const data = (await response.json()) as OpenRouterModelsResponse;
+      const models = Array.isArray(data?.data) ? data.data : [];
+
+      return models
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((m) => {
-          // Get accurate context window from OpenRouter API
-          const contextWindow = m.context_length || 32000; // Use API value or fallback
+          const promptPrice = Number(m.pricing?.prompt ?? 0);
+          const completionPrice = Number(m.pricing?.completion ?? 0);
+
+          // Get accurate context window from OpenRouter API (fallback to 32k if missing)
+          const contextWindow = Number(m.context_length || 32000);
 
           // Cap at reasonable limits to prevent issues (OpenRouter has some very large models)
           const maxAllowed = 1000000; // 1M tokens max for safety
@@ -73,7 +98,7 @@ export default class OpenRouterProvider extends BaseProvider {
 
           return {
             name: m.id,
-            label: `${m.name} - in:$${(m.pricing.prompt * 1_000_000).toFixed(2)} out:$${(m.pricing.completion * 1_000_000).toFixed(2)} - context ${finalContext >= 1000000 ? Math.floor(finalContext / 1000000) + 'M' : Math.floor(finalContext / 1000) + 'k'}`,
+            label: `${m.name} - in:$${(promptPrice * 1_000_000).toFixed(2)} out:$${(completionPrice * 1_000_000).toFixed(2)} - context ${finalContext >= 1000000 ? Math.floor(finalContext / 1000000) + 'M' : Math.floor(finalContext / 1000) + 'k'}`,
             provider: this.name,
             maxTokenAllowed: finalContext,
           };
