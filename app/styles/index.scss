@@ -24,6 +24,24 @@ body {
   // --accent-color: rgba(180, 170, 220, var(--gradient-opacity));
 }
 
+/* Crimson-Azure Gradient Theme Classes */
+.bg-gradient-crimson-azure {
+  background: linear-gradient(135deg, var(--bolt-gradient-crimson) 0%, var(--bolt-bg-gradient-mid) 50%, var(--bolt-gradient-azure) 100%);
+}
+
+.text-gradient-crimson-azure {
+  background: linear-gradient(135deg, #dc2626 0%, #8A5FFF 50%, #051937 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.gradient-border-crimson-azure {
+  border: 2px solid transparent;
+  background: linear-gradient(var(--bolt-elements-bg-depth-1), var(--bolt-elements-bg-depth-1)) padding-box,
+              linear-gradient(135deg, #dc2626, #8A5FFF, #051937) border-box;
+}
+
 .modern-scrollbar {
   overflow: auto;
 

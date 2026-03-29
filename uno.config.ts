@@ -85,6 +85,32 @@ const BASE_COLORS = {
     900: '#7F1D1D',
     950: '#450A0A',
   },
+  azure: {
+    50: '#F0F9FF',
+    100: '#E0F2FE',
+    200: '#BAE6FD',
+    300: '#7DD3FC',
+    400: '#38BDF8',
+    500: '#0EA5E9',
+    600: '#0284C7',
+    700: '#0369A1',
+    800: '#075985',
+    900: '#0C4A6E',
+    950: '#051937',
+  },
+  crimson: {
+    50: '#FEF2F2',
+    100: '#FEE2E2',
+    200: '#FECACA',
+    300: '#FCA5A5',
+    400: '#F87171',
+    500: '#EF4444',
+    600: '#DC2626',
+    700: '#B91C1C',
+    800: '#991B1B',
+    900: '#7F1D1D',
+    950: '#450A0A',
+  },
 };
 
 const COLOR_PRIMITIVES = {
@@ -104,6 +130,12 @@ export default defineConfig({
     'transition-theme': 'transition-[background-color,border-color,color] duration-150 bolt-ease-cubic-bezier',
     kdb: 'bg-bolt-elements-code-background text-bolt-elements-code-text py-1 px-1.5 rounded-md',
     'max-w-chat': 'max-w-[var(--chat-max-width)]',
+    /* Crimson-Azure gradient theme shortcuts */
+    'bg-gradient-crimson-azure': 'bg-gradient-to-br from-crimson-950 via-gray-950 to-azure-950',
+    'bg-gradient-crimson': 'bg-gradient-to-r from-crimson-900 to-crimson-700',
+    'bg-gradient-azure': 'bg-gradient-to-r from-azure-900 to-azure-700',
+    'text-gradient-crimson-azure': 'bg-clip-text text-transparent bg-gradient-to-r from-crimson-500 via-accent-500 to-azure-500',
+    'border-gradient-crimson-azure': 'border border-transparent bg-gradient-to-r from-crimson-500 to-azure-500 bg-origin-border',
   },
   rules: [
     /**
