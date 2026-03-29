@@ -5,6 +5,7 @@ import type {
   GitHubOrganization,
   GitHubStats,
   GitHubLanguageStats,
+  RepoComparisonResult,
 } from '~/types/GitHub';
 
 export interface GitHubApiServiceConfig {
@@ -537,10 +538,11 @@ export class GitHubApiServiceClass {
 
   /**
    * Get contributor statistics (additions/deletions per week)
+   * The GitHub API returns an array of contributor stats, one per author
    */
-  async getContributorStats(owner: string, repo: string): Promise<ContributorStats | null> {
+  async getContributorStats(owner: string, repo: string): Promise<ContributorStats[] | null> {
     try {
-      return await this._makeRequestInternal<ContributorStats>(`/repos/${owner}/${repo}/stats/contributors`);
+      return await this._makeRequestInternal<ContributorStats[]>(`/repos/${owner}/${repo}/stats/contributors`);
     } catch (error) {
       console.warn(`Could not fetch contributor stats for ${owner}/${repo}:`, error);
       return null;
@@ -552,9 +554,21 @@ export class GitHubApiServiceClass {
    */
   async getTopContributors(owner: string, repo: string, limit: number = 10): Promise<AuthorStats[]> {
     const contributors = await this._makeRequestInternal<any[]>(`/repos/${owner}/${repo}/contributors?per_page=${limit}`);
-    const contributorStats = await this.getContributorStats(owner, repo);
+    const contributorStatsArray = await this.getContributorStats(owner, repo);
+
+    // Create a map from author login/id to their stats for O(1) lookup
+    const statsMap = new Map<string, ContributorStats>();
+    if (contributorStatsArray) {
+      for (const stats of contributorStatsArray) {
+        if (stats.author?.login) {
+          statsMap.set(stats.author.login, stats);
+        }
+      }
+    }
 
     return contributors.map((contributor) => {
+      // Find matching stats entry for this contributor by login
+      const contributorStats = statsMap.get(contributor.login);
       const stats = contributorStats?.weeks?.[contributorStats.weeks.length - 1];
       return {
         login: contributor.login,

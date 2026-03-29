@@ -100,54 +100,57 @@ export class AnalysisServiceClass {
     const healthIssues: CodeHealthIssue[] = [];
     const lines = content.split('\n');
 
-    // Check for hardcoded secrets
-    const secretPatterns = [
-      { regex: /password\s*=\s*['"][^'"]+['"]/gi, severity: 'critical' as const, category: 'Hardcoded Credentials' },
-      { regex: /api[_-]?key\s*=\s*['"][^'"]+['"]/gi, severity: 'high' as const, category: 'API Key Exposure' },
-      { regex: /secret\s*=\s*['"][^'"]+['"]/gi, severity: 'high' as const, category: 'Secret Exposure' },
-      { regex: /token\s*=\s*['"][^'"]+['"]/gi, severity: 'high' as const, category: 'Token Exposure' },
-      { regex: /aws[_-]?access[_-]?key/gi, severity: 'critical' as const, category: 'AWS Credentials' },
-      { regex: /sk-[a-zA-Z0-9]{20,}/g, severity: 'critical' as const, category: 'OpenAI Key' },
+    // Check for hardcoded secrets - use function to create fresh regex each time
+    // to avoid lastIndex issues with global regexes
+    const secretPatternDefs = [
+      { pattern: 'password\\s*=\\s*[\'"][^\'"]+[\'"]', severity: 'critical' as const, category: 'Hardcoded Credentials' },
+      { pattern: 'api[_-]?key\\s*=\\s*[\'"][^\'"]+[\'"]', severity: 'high' as const, category: 'API Key Exposure' },
+      { pattern: 'secret\\s*=\\s*[\'"][^\'"]+[\'"]', severity: 'high' as const, category: 'Secret Exposure' },
+      { pattern: 'token\\s*=\\s*[\'"][^\'"]+[\'"]', severity: 'high' as const, category: 'Token Exposure' },
+      { pattern: 'aws[_-]?access[_-]?key', severity: 'critical' as const, category: 'AWS Credentials' },
+      { pattern: 'sk-[a-zA-Z0-9]{20,}', severity: 'critical' as const, category: 'OpenAI Key' },
     ];
 
-    // Check for common security issues
-    const securityPatterns = [
-      { regex: /eval\s*\(/g, severity: 'high' as const, category: 'Code Injection', suggestion: 'Avoid using eval()' },
-      { regex: /innerHTML\s*=/g, severity: 'medium' as const, category: 'XSS Vulnerability', suggestion: 'Use textContent instead' },
-      { regex: /dangerouslySetInnerHTML/g, severity: 'medium' as const, category: 'XSS Risk', suggestion: 'Sanitize content before using' },
-      { regex: /process\.env\.NODE_ENV\s*===\s*['"]development['"]/g, severity: 'low' as const, category: 'Debug Code' },
-      { regex: /console\.log\s*\(/g, severity: 'low' as const, category: 'Debug Statement', suggestion: 'Remove console.log in production' },
-      { regex: /TODO|FIXME|XXX|HACK/g, severity: 'low' as const, category: 'Technical Debt', suggestion: 'Address TODO items' },
-      { regex: /catch\s*\(\s*\)\s*{}/g, severity: 'medium' as const, category: 'Empty Catch Block', suggestion: 'Handle errors properly' },
-      { regex: /setTimeout\s*\(\s*['"]/g, severity: 'medium' as const, category: 'String setTimeout', suggestion: 'Use function reference' },
+    // Check for common security issues - use function to create fresh regex each time
+    const securityPatternDefs = [
+      { pattern: 'eval\\s*\\(', severity: 'high' as const, category: 'Code Injection', suggestion: 'Avoid using eval()' },
+      { pattern: 'innerHTML\\s*=', severity: 'medium' as const, category: 'XSS Vulnerability', suggestion: 'Use textContent instead' },
+      { pattern: 'dangerouslySetInnerHTML', severity: 'medium' as const, category: 'XSS Risk', suggestion: 'Sanitize content before using' },
+      { pattern: 'process\\.env\\.NODE_ENV\\s*===\s*[\'"]development[\'"]', severity: 'low' as const, category: 'Debug Code' },
+      { pattern: 'console\\.log\\s*\\(', severity: 'low' as const, category: 'Debug Statement', suggestion: 'Remove console.log in production' },
+      { pattern: 'TODO|FIXME|XXX|HACK', severity: 'low' as const, category: 'Technical Debt', suggestion: 'Address TODO items' },
+      { pattern: 'catch\\s*\\(\\s*\\)\\s*{}', severity: 'medium' as const, category: 'Empty Catch Block', suggestion: 'Handle errors properly' },
+      { pattern: 'setTimeout\\s*\\(\\s*[\'"]', severity: 'medium' as const, category: 'String setTimeout', suggestion: 'Use function reference' },
     ];
 
     lines.forEach((line, index) => {
       const lineNum = index + 1;
 
-      // Check for secrets
-      for (const pattern of secretPatterns) {
-        if (pattern.regex.test(line)) {
+      // Check for secrets - create fresh regex for each line to avoid lastIndex issues
+      for (const def of secretPatternDefs) {
+        const regex = new RegExp(def.pattern, 'i');
+        if (regex.test(line)) {
           vulnerabilities.push({
-            severity: pattern.severity,
-            category: pattern.category,
+            severity: def.severity,
+            category: def.category,
             file: filePath,
             line: lineNum,
-            description: `Potential ${pattern.category} found`,
+            description: `Potential ${def.category} found`,
             recommendation: 'Move sensitive data to environment variables',
           });
         }
       }
 
-      // Check for security issues
-      for (const pattern of securityPatterns) {
-        if (pattern.regex.test(line)) {
+      // Check for security issues - create fresh regex for each line to avoid lastIndex issues
+      for (const def of securityPatternDefs) {
+        const regex = new RegExp(def.pattern);
+        if (regex.test(line)) {
           healthIssues.push({
-            type: pattern.severity === 'high' ? 'security' : pattern.severity === 'medium' ? 'bug' : 'best-practice',
+            type: def.severity === 'high' ? 'security' : def.severity === 'medium' ? 'bug' : 'best-practice',
             file: filePath,
             line: lineNum,
-            message: `Potential ${pattern.category}`,
-            suggestion: pattern.suggestion,
+            message: `Potential ${def.category}`,
+            suggestion: def.suggestion,
           });
         }
       }
