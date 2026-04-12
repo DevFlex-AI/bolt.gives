@@ -5,8 +5,13 @@ export type Theme = 'dark' | 'light';
 
 export const kTheme = 'bolt_theme';
 
+
 function isTheme(value: unknown): value is Theme {
   return value === 'dark' || value === 'light';
+=======
+function isTheme(v: unknown): v is Theme {
+  return v === 'dark' || v === 'light';
+
 }
 
 export function themeIsDark() {
