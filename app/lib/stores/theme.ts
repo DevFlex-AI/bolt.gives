@@ -1,15 +1,16 @@
 import { atom } from 'nanostores';
 import { logStore } from './logs';
 
-export type Theme = 'dark' | 'light';
+export type Theme = 'dark' | 'light' | 'cyber-pro';
 
 export const kTheme = 'bolt_theme';
 
 export function themeIsDark() {
-  return themeStore.get() === 'dark';
+  const theme = themeStore.get();
+  return theme === 'dark' || theme === 'cyber-pro';
 }
 
-export const DEFAULT_THEME = 'light';
+export const DEFAULT_THEME = 'cyber-pro';
 
 export const themeStore = atom<Theme>(initStore());
 

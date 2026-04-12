@@ -35,15 +35,29 @@ export function Header() {
         >
           <div className="i-ph:sidebar-simple-duotone text-lg sm:text-xl" />
         </button>
-        <a href="/" className="text-2xl font-semibold text-accent flex items-center">
-          {/* <span className="i-bolt:logo-text?mask w-[46px] inline-block" /> */}
-          <img
-            src={`/boltlogo2.png?v=${APP_VERSION}`}
-            alt="bolt.gives"
-            className="h-[calc(var(--header-height)-14px)] w-auto max-w-[120px] sm:max-w-[180px] md:max-w-[220px] object-contain"
-            loading="eager"
-          />
-          <span className="hidden sm:inline-flex ml-2 px-2 py-1 rounded-full border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-xs font-mono text-bolt-elements-textSecondary">
+        <a href="/" className="text-2xl font-semibold text-accent flex items-center gap-3">
+          {/* Neural SVG Logo - 5KB vs 1.6MB PNG */}
+          <svg viewBox="0 0 120 40" className="h-8 w-auto" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" style="stop-color:#00FF41"/>
+                <stop offset="100%" style="stop-color:#00E0FF"/>
+              </linearGradient>
+              <filter id="logoGlow">
+                <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+                <feMerge>
+                  <feMergeNode in="coloredBlur"/>
+                  <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+              </filter>
+            </defs>
+            <path d="M8 6L5 19H12L10 32L20 16H13L15 6H8Z" 
+                  fill="url(#logoGradient)" 
+                  filter="url(#logoGlow)"/>
+            <text x="26" y="22" fontFamily="Geist Mono, monospace" fontSize="14" fontWeight="600" fill="#ffffff">bolt</text>
+            <text x="56" y="22" fontFamily="Geist Mono, monospace" fontSize="14" fontWeight="600" fill="url(#logoGradient)">.gives</text>
+          </svg>
+          <span className="hidden lg:inline-flex px-2 py-0.5 rounded-full border border-neural-500/30 bg-neural-500/10 text-[10px] font-mono text-neural-500">
             v{APP_VERSION}
           </span>
         </a>
