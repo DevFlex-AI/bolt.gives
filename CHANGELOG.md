@@ -2,29 +2,8 @@
 
 ## Unreleased (`v3.0.9` in progress)
 
-### Added - Base44 Cyber-Pro Architectural Overhaul
-
-- **Neural Theme System**: Complete visual redesign with Deep Space (#050505), Neural Green (#00FF41), Intelligence Blue (#00E0FF), and Critical Red (#FF3131) palette
-- **Glassmorphism UI**: 20px blur effects with 1px alpha borders (rgba 255,255,255,0.05) across all panels
-- **Geist Mono Typography**: Full integration with optical sizing and terminal-density hierarchy
-- **Activity Sidebar**: Collapsible side panel with Agent Hub, Runtime Scanner, Git, History, and Settings tabs
-- **Agent Hub**: Multi-CLI orchestration for Claude Code, Gemini CLI, Codex, and Open Code with xterm.js multiplexing
-- **Protocol Bridge**: Bi-directional IPC sync between CLI agents and WebContainer workspace
-- **Runtime Scanner**: Real-time stderr/stdout monitoring with active build crash detection
-- **Self-Heal System**: Auto-reboot logic for preview frame with 3-strike fix attempt limit before user escalation
-- **SVG Logo**: Replaced 1.6MB PNG with 5KB optimized SVG with neural gradient glow
-
-### Performance & Stability
-
-- 60FPS virtualization foundation for FileTree, History, and Terminal components
-- Lazy loading for heavy sidebar components
-- Neural grid background pattern with ambient glow effects
-- Enhanced animation system with reduced-motion support
-- Streamlined CSS custom properties for theme tokens
-
 ### Changed
 
-- Default theme now set to 'cyber-pro' with unified dark/light neural aesthetic
 - `ROADMAP.md` is now rewritten around the actual `v3.0.9` launch plan, with explicit launch blockers, operator/self-host priorities, and release metrics.
 - `README.md` now surfaces the `v3.0.9` roadmap near the top, keeps the `create.bolt.gives` trial flow prominent, and removes a large amount of unnecessary release-history detail from the main read path.
 - The hosted `FREE` default path is pinned to `deepseek/deepseek-v3.2`, with the server runtime carrying the protected OpenRouter token so hosted and trial instances can start coding immediately without exposing operator credentials.

@@ -1,14 +1,11 @@
 import { json, redirect, type LoaderFunctionArgs, type MetaFunction } from '@remix-run/cloudflare';
 import { ClientOnly } from 'remix-utils/client-only';
-import { lazy, Suspense } from 'react';
 import { Chat } from '~/components/chat/Chat.client';
 import { Header } from '~/components/header/Header';
 import { FREE_HOSTED_MODEL_LABEL, FREE_PROVIDER_NAME } from '~/lib/modules/llm/free-provider-config';
 import { getCreateRedirectHost, getPublicUrlConfig } from '~/lib/public-urls';
+import BackgroundRays from '~/components/ui/BackgroundRays';
 import { APP_VERSION } from '~/lib/version';
-
-// Lazy load Activity Sidebar
-const ActivitySidebar = lazy(() => import('~/components/activity-sidebar/ActivitySidebar').then(m => ({ default: m.ActivitySidebar })));
 
 export const meta: MetaFunction = () => {
   return [
@@ -56,32 +53,17 @@ function HomeShellFallback() {
 }
 
 /**
- * Landing page component for Bolt - Cyber-Pro Edition
- * Features: Activity Sidebar, Neural Theme, Glassmorphism
+ * Landing page component for Bolt
+ * Note: Settings functionality should ONLY be accessed through the sidebar menu.
+ * Do not add settings button/panel to this landing page as it was intentionally removed
+ * to keep the UI clean and consistent with the design system.
  */
 export default function Index() {
   return (
-    <div className="flex h-full w-full bg-bolt-elements-background-depth-1">
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <Header />
-        <div className="flex-1 flex overflow-hidden">
-          <ClientOnly fallback={<HomeShellFallback />}>
-            {() => (
-              <div className="flex-1 overflow-hidden">
-                <Chat />
-              </div>
-            )}
-          </ClientOnly>
-        </div>
-      </div>
-      
-      {/* Activity Sidebar - Lazy Loaded */}
-      <Suspense fallback={<div className="w-14 glass-sidebar" />}>
-        <ClientOnly>
-          {() => <ActivitySidebar />}
-        </ClientOnly>
-      </Suspense>
+    <div className="flex flex-col h-full w-full bg-bolt-elements-background-depth-1">
+      <BackgroundRays />
+      <Header />
+      <ClientOnly fallback={<HomeShellFallback />}>{() => <Chat />}</ClientOnly>
     </div>
   );
 }
