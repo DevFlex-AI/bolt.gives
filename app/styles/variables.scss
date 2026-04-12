@@ -85,6 +85,18 @@
   --bolt-surface-glow-blur: 16px;
   --bolt-surface-glow-strength: 0.34;
 
+
+  /* Gradient Theme (light mode - subtle colors) */
+  --bolt-bg-gradient: linear-gradient(135deg, #fee2e2 0%, #f3f4f6 50%, #dbeafe 100%);
+  --bolt-bg-gradient-start: #fee2e2;
+  --bolt-bg-gradient-mid: #f3f4f6;
+  --bolt-bg-gradient-end: #dbeafe;
+  --bolt-gradient-crimson: #fee2e2;
+  --bolt-gradient-azure: #dbeafe;
+  --bolt-gradient-accent: #3b82f6;
+  --bolt-gradient-red: #ef4444;
+  --bolt-gradient-blue: #3b82f6;
+
   /* Crimson-Azure Gradient Theme (light mode - subtle gradients) */
   --bolt-bg-gradient: linear-gradient(135deg, #fef2f2 0%, #f9fafb 50%, #eff6ff 100%);
   --bolt-bg-gradient-start: #fef2f2;
@@ -95,6 +107,7 @@
   --bolt-gradient-accent: #3b82f6;
   --bolt-gradient-red: #dc2626;
   --bolt-gradient-blue: #2563eb;
+
 
   /* Terminal Colors */
   --bolt-terminal-background: var(--bolt-elements-terminals-background);
@@ -203,6 +216,19 @@
   --bolt-elements-cta-background: theme('colors.alpha.white.10');
   --bolt-elements-cta-text: theme('colors.white');
   --bolt-cursor-glow-opacity: 0.3;
+  --bolt-surface-glow-blur: 12px;
+  --bolt-surface-glow-strength: 0.26;
+
+  /* Crimson-Azure Gradient Theme (dark mode) */
+  --bolt-bg-gradient: linear-gradient(135deg, #450A0A 0%, #0A0A0A 50%, #051937 100%);
+  --bolt-bg-gradient-start: #450A0A;
+  --bolt-bg-gradient-mid: #0A0A0A;
+  --bolt-bg-gradient-end: #051937;
+  --bolt-gradient-crimson: #450A0A;
+  --bolt-gradient-azure: #051937;
+  --bolt-gradient-accent: #3b82f6;
+  --bolt-gradient-red: #dc2626;
+  --bolt-gradient-blue: #2563eb;
 
   /* Crimson-Azure Gradient Theme (dark red to blue) */
   --bolt-bg-gradient: linear-gradient(135deg, #450A0A 0%, #0A0A0A 50%, #051937 100%);
