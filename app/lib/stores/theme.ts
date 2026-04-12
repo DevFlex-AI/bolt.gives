@@ -5,6 +5,10 @@ export type Theme = 'dark' | 'light';
 
 export const kTheme = 'bolt_theme';
 
+function isTheme(value: unknown): value is Theme {
+  return value === 'dark' || value === 'light';
+}
+
 export function themeIsDark() {
   return themeStore.get() === 'dark';
 }
@@ -15,10 +19,18 @@ export const themeStore = atom<Theme>(initStore());
 
 function initStore() {
   if (!import.meta.env.SSR) {
-    const persistedTheme = localStorage.getItem(kTheme) as Theme | undefined;
+    const persistedTheme = localStorage.getItem(kTheme);
     const themeAttribute = document.querySelector('html')?.getAttribute('data-theme');
 
-    return persistedTheme ?? (themeAttribute as Theme) ?? DEFAULT_THEME;
+    if (isTheme(persistedTheme)) {
+      return persistedTheme;
+    }
+
+    if (isTheme(themeAttribute)) {
+      return themeAttribute;
+    }
+
+    return DEFAULT_THEME;
   }
 
   return DEFAULT_THEME;
