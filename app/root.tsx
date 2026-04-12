@@ -6,7 +6,7 @@ import tailwindReset from '@unocss/reset/tailwind-compat.css?url';
 import { themeStore } from './lib/stores/theme';
 import { stripIndents } from './utils/stripIndent';
 import { createHead } from 'remix-island';
-import { useEffect } from 'react';
+import { useEffect, Suspense, lazy } from 'react';
 import { cssTransition, ToastContainer } from 'react-toastify';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
@@ -18,6 +18,9 @@ import { PublicUrlConfigProvider } from './lib/public-url-context';
 import { getPublicUrlConfig } from './lib/public-urls';
 
 import 'virtual:uno.css';
+
+// Lazy load heavy components
+const ActivitySidebar = lazy(() => import('./components/activity-sidebar/ActivitySidebar').then(m => ({ default: m.ActivitySidebar })));
 
 const toastAnimation = cssTransition({
   enter: 'animated fadeInRight',
@@ -50,7 +53,7 @@ export const links: LinksFunction = () => [
   },
   {
     rel: 'stylesheet',
-    href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap',
+    href: 'https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600;700&display=swap',
   },
 ];
 
